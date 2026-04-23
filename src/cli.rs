@@ -14,6 +14,8 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     Start(StartArgs),
+    #[command(hide = true)]
+    Run(RunArgs),
     Stop(SocketArgs),
     Reload(SocketArgs),
     Status(SocketArgs),
@@ -32,17 +34,25 @@ pub struct SocketArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct ConfigArgs {
-    #[arg(long, default_value = "barrs.lua")]
-    pub config: PathBuf,
+    #[arg(long)]
+    pub config: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args)]
 pub struct StartArgs {
-    #[arg(long, default_value = "barrs.lua")]
-    pub config: PathBuf,
+    #[arg(long)]
+    pub config: Option<PathBuf>,
     #[arg(long)]
     pub socket: Option<PathBuf>,
-    #[arg(long, value_enum, default_value_t = RendererKind::Noop)]
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct RunArgs {
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+    #[arg(long)]
+    pub socket: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = RendererKind::Native)]
     pub renderer: RendererKind,
 }
 
@@ -120,9 +130,9 @@ mod tests {
 
     #[test]
     fn parses_renderer_selection() {
-        let cli = Cli::parse_from(["barrs", "start", "--renderer", "noop"]);
+        let cli = Cli::parse_from(["barrs", "run", "--renderer", "noop"]);
         match cli.command {
-            Command::Start(args) => assert_eq!(args.renderer, RendererKind::Noop),
+            Command::Run(args) => assert_eq!(args.renderer, RendererKind::Noop),
             other => panic!("unexpected command: {other:?}"),
         }
     }

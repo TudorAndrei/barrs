@@ -1,6 +1,12 @@
-use std::path::PathBuf;
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command as ProcessCommand, Stdio};
 
-use crate::cli::{Cli, Command, RiftCommand};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
+use crate::cli::{Cli, Command, RiftCommand, RunArgs};
 use crate::daemon::Daemon;
 use crate::error::BarrsError;
 use crate::ipc::{EventPayload, Request, Response, default_socket_path, send_request};
@@ -10,9 +16,24 @@ use crate::{config, rift};
 pub async fn run(cli: Cli) -> Result<(), BarrsError> {
     match cli.command {
         Command::Start(args) => {
-            let config = config::load_config(&args.config)?;
+            let config_path = resolve_config_path(args.config);
+            ensure_config_exists(&config_path)?;
+            spawn_background_process(RunArgs {
+                config: Some(config_path.clone()),
+                socket: args.socket,
+                renderer: crate::render::RendererKind::Native,
+            })?;
+            print_response(Response::Ok {
+                message: format!("started barrs with {}", config_path.display()),
+            });
+            Ok(())
+        }
+        Command::Run(args) => {
+            let config_path = resolve_config_path(args.config);
+            ensure_config_exists(&config_path)?;
+            let config = config::load_config(&config_path)?;
             let daemon = Daemon::new(
-                args.config,
+                config_path,
                 apply_socket_override(config, args.socket),
                 create_renderer(args.renderer)?,
             )?;
@@ -35,11 +56,12 @@ pub async fn run(cli: Cli) -> Result<(), BarrsError> {
             Ok(())
         }
         Command::ValidateConfig(args) => {
-            let config = config::load_config(&args.config)?;
+            let config_path = resolve_config_path(args.config);
+            let config = config::load_config(&config_path)?;
             let response = Response::Ok {
                 message: format!(
                     "validated {} with {} item(s)",
-                    args.config.display(),
+                    config_path.display(),
                     config.items.len()
                 ),
             };
@@ -81,6 +103,65 @@ pub async fn run(cli: Cli) -> Result<(), BarrsError> {
             }
         },
     }
+}
+
+fn resolve_config_path(path: Option<PathBuf>) -> PathBuf {
+    path.unwrap_or_else(default_config_path)
+}
+
+fn default_config_path() -> PathBuf {
+    home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config")
+        .join("barrs")
+        .join("barrs.lua")
+}
+
+fn home_dir() -> Option<PathBuf> {
+    env::var_os("HOME").map(PathBuf::from)
+}
+
+fn ensure_config_exists(path: &Path) -> Result<(), BarrsError> {
+    if path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, include_str!("../barrs.lua"))?;
+    Ok(())
+}
+
+fn spawn_background_process(args: RunArgs) -> Result<(), BarrsError> {
+    let current_exe = env::current_exe()?;
+    let mut command = ProcessCommand::new(current_exe);
+    command
+        .arg("run")
+        .arg("--renderer")
+        .arg(match args.renderer {
+            crate::render::RendererKind::Native => "native",
+            crate::render::RendererKind::Noop => "noop",
+        })
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(config) = args.config {
+        command.arg("--config").arg(config);
+    }
+    if let Some(socket) = args.socket {
+        command.arg("--socket").arg(socket);
+    }
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command.spawn()?;
+    Ok(())
 }
 
 fn socket_or_default(path: Option<PathBuf>) -> PathBuf {

@@ -29,13 +29,26 @@ class Barrs < Formula
     pkgshare.install "barrs.lua"
   end
 
+  service do
+    run [opt_bin/"barrs", "run"]
+    run_type :immediate
+    log_path var/"log/barrs.log"
+    error_log_path var/"log/barrs.log"
+  end
+
   def caveats
     <<~EOS
       A sample configuration was installed to:
         #{pkgshare}/barrs.lua
 
-      Start the native renderer with:
-        barrs start --renderer native --config #{pkgshare}/barrs.lua
+      barrs writes its default config to:
+        ~/.config/barrs/barrs.lua
+
+      Start it as a launchd service with:
+        brew services start barrs
+
+      Or run it manually with:
+        barrs start
     EOS
   end
 
