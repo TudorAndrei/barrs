@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,7 @@ const ITEM_TEXT_HEIGHT: f64 = 18.0;
 const ITEM_TRAILING_TEXT_PADDING: f64 = 8.0;
 const BAR_HEIGHT: f64 = 28.0;
 const DEFAULT_ITEM_SPACING: f64 = 6.0;
+const HOVER_PANEL_LIFETIME: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum RendererKind {
@@ -430,6 +432,7 @@ struct AppKitHost {
     content_view: Option<objc2::rc::Retained<NSView>>,
     hover_panel: Option<objc2::rc::Retained<NSPanel>>,
     hover_label: Option<objc2::rc::Retained<NSTextField>>,
+    hover_shown_at: Option<Instant>,
     item_views: HashMap<String, AppKitItemView>,
     pending_events: Vec<EventPayload>,
     pointer_item: Option<String>,
@@ -449,6 +452,7 @@ impl Default for AppKitHost {
             content_view: None,
             hover_panel: None,
             hover_label: None,
+            hover_shown_at: None,
             item_views: HashMap::new(),
             pending_events: Vec::new(),
             pointer_item: None,
@@ -494,6 +498,7 @@ impl NativeHost for AppKitHost {
 #[cfg(target_os = "macos")]
 impl AppKitHost {
     fn pump_events(&mut self) -> Result<(), BarrsError> {
+        self.dismiss_expired_hover_panel();
         let Some(app) = self.app.clone() else {
             return Ok(());
         };
@@ -520,30 +525,51 @@ impl AppKitHost {
     }
 
     fn event_payloads(&mut self, event: &NSEvent) -> Vec<EventPayload> {
-        let Some(target) = self.hit_test_event(event) else {
-            return Vec::new();
-        };
+        let target = self.hit_test_event(event);
         match event.r#type() {
             NSEventType::MouseMoved | NSEventType::LeftMouseDragged | NSEventType::RightMouseDragged => {
-                self.hover_payloads(target, event)
+                if let Some(target) = target {
+                    self.hover_payloads(target, event)
+                } else {
+                    self.dismiss_hover_panel();
+                    Vec::new()
+                }
             }
             NSEventType::LeftMouseDown => {
-                vec![event_payload(target, EventKind::Click, event, Some("left".into()), None)]
+                if let Some(target) = target {
+                    vec![event_payload(target, EventKind::Click, event, Some("left".into()), None)]
+                } else {
+                    self.dismiss_hover_panel();
+                    Vec::new()
+                }
             }
-            NSEventType::RightMouseDown => vec![event_payload(
-                target,
-                EventKind::RightClick,
-                event,
-                Some("right".into()),
-                None,
-            )],
-            NSEventType::ScrollWheel => vec![event_payload(
-                target,
-                EventKind::Scroll,
-                event,
-                None,
-                Some(event.scrollingDeltaY().round() as i32),
-            )],
+            NSEventType::RightMouseDown => {
+                if let Some(target) = target {
+                    vec![event_payload(
+                        target,
+                        EventKind::RightClick,
+                        event,
+                        Some("right".into()),
+                        None,
+                    )]
+                } else {
+                    self.dismiss_hover_panel();
+                    Vec::new()
+                }
+            }
+            NSEventType::ScrollWheel => {
+                if let Some(target) = target {
+                    vec![event_payload(
+                        target,
+                        EventKind::Scroll,
+                        event,
+                        None,
+                        Some(event.scrollingDeltaY().round() as i32),
+                    )]
+                } else {
+                    Vec::new()
+                }
+            }
             _ => Vec::new(),
         }
     }
@@ -710,7 +736,15 @@ impl AppKitHost {
         }
 
         let text = hover_panel_text(panel);
-        let frame = hover_panel_frame(panel, &text);
+        let anchor = self
+            .window
+            .as_ref()
+            .map(|window| {
+                let frame = window.frame();
+                (frame.origin.x + panel.anchor_x, frame.origin.y)
+            })
+            .unwrap_or((panel.anchor_x, panel.anchor_y));
+        let frame = hover_panel_frame_at(anchor.0, anchor.1, &text);
         if let Some(label) = &self.hover_label {
             label.setStringValue(&NSString::from_str(&text));
             label.setFrame(NSRect {
@@ -725,12 +759,29 @@ impl AppKitHost {
             panel_window.setFrame_display(ns_rect(&frame), true);
             panel_window.orderFrontRegardless();
         }
+        self.hover_shown_at = Some(Instant::now());
         Ok(())
     }
 
     fn hide_hover_panel(&mut self) {
         if let Some(panel) = &self.hover_panel {
             panel.orderOut(None);
+        }
+        self.hover_shown_at = None;
+    }
+
+    fn dismiss_hover_panel(&mut self) {
+        self.pointer_item = None;
+        self.hide_hover_panel();
+    }
+
+    fn dismiss_expired_hover_panel(&mut self) {
+        let expired = self
+            .hover_shown_at
+            .map(|shown_at| shown_at.elapsed() >= HOVER_PANEL_LIFETIME)
+            .unwrap_or(false);
+        if expired {
+            self.dismiss_hover_panel();
         }
     }
 }
@@ -981,6 +1032,11 @@ fn hover_panel_text(panel: &HoverPanelPlan) -> String {
 
 #[cfg(target_os = "macos")]
 fn hover_panel_frame(panel: &HoverPanelPlan, text: &str) -> WindowFrame {
+    hover_panel_frame_at(panel.anchor_x, panel.anchor_y, text)
+}
+
+#[cfg(target_os = "macos")]
+fn hover_panel_frame_at(anchor_x: f64, anchor_y: f64, text: &str) -> WindowFrame {
     let max_line_width = text
         .lines()
         .map(|line| line.chars().count())
@@ -990,8 +1046,8 @@ fn hover_panel_frame(panel: &HoverPanelPlan, text: &str) -> WindowFrame {
     let width = (max_line_width * CHARACTER_WIDTH) + 24.0;
     let height = (line_count * 18.0) + 16.0;
     WindowFrame {
-        x: panel.anchor_x - (width / 2.0),
-        y: panel.anchor_y + 4.0,
+        x: anchor_x - (width / 2.0),
+        y: anchor_y - height - 4.0,
         width,
         height,
     }

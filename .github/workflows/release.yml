@@ -1,0 +1,117 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    name: build-macos-${{ matrix.target }}
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package archive
+        env:
+          TARGET: ${{ matrix.target }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euxo pipefail
+          archive="barrs-${TAG}-${TARGET}.tar.gz"
+          staging="$(mktemp -d)"
+          cp "target/${TARGET}/release/barrs" "${staging}/barrs"
+          cp LICENSE "${staging}/LICENSE"
+          cp barrs.lua "${staging}/barrs.lua"
+          tar -C "${staging}" -czf "${archive}" barrs LICENSE barrs.lua
+          shasum -a 256 "${archive}" | awk '{print $1}' > "${archive}.sha256"
+
+      - name: Upload packaged archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}-release
+          path: |
+            barrs-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+            barrs-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+
+  release:
+    name: publish-release
+    runs-on: ubuntu-latest
+    needs: build-macos
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Flatten artifact directories
+        run: |
+          set -euxo pipefail
+          find dist -mindepth 2 -type f -exec mv {} dist/ \;
+
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+          generate_release_notes: true
+
+      - name: Generate Homebrew formula
+        env:
+          TAG: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euxo pipefail
+          version="${TAG#v}"
+          arm_archive="barrs-${TAG}-aarch64-apple-darwin.tar.gz"
+          intel_archive="barrs-${TAG}-x86_64-apple-darwin.tar.gz"
+          arm_sha="$(cat "dist/${arm_archive}.sha256")"
+          intel_sha="$(cat "dist/${intel_archive}.sha256")"
+          mkdir -p Formula
+          ./scripts/generate-homebrew-formula.sh \
+            "${version}" \
+            "${REPOSITORY}" \
+            "${arm_archive}" \
+            "${arm_sha}" \
+            "${intel_archive}" \
+            "${intel_sha}" \
+            > Formula/barrs.rb
+
+      - name: Commit updated Homebrew formula
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euxo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout "${DEFAULT_BRANCH}"
+          if git diff --quiet -- Formula/barrs.rb; then
+            exit 0
+          fi
+          git add Formula/barrs.rb
+          git commit -m "Update Homebrew formula for ${GITHUB_REF_NAME}"
+          git push origin "${DEFAULT_BRANCH}"

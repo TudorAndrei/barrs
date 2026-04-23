@@ -15,6 +15,13 @@ tokio = { version = "1.44", features = ["macros", "net", "rt", "sync", "io-util"
 [dev-dependencies]
 tempfile = "3.13"
 
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+panic = "abort"
+strip = true
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSColor", "NSControl", "NSEvent", "NSFont", "NSGraphics", "NSPanel", "NSResponder", "NSRunningApplication", "NSScreen", "NSTextField", "NSView", "NSWindow"] }

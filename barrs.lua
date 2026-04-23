@@ -15,12 +15,6 @@ return {
 			hover = { tooltip = "Current Rift workspaces" },
 		},
 		{
-			id = "layout",
-			icon = "󰙀",
-			plugin = { kind = "rift_layout" },
-			hover = { tooltip = "Current Rift layout" },
-		},
-		{
 			id = "cpu",
 			icon = "󰘚",
 			plugin = { kind = "cpu" },
