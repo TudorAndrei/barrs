@@ -1,10 +1,23 @@
-use std::path::Path;
-use std::process::Command;
+use std::collections::hash_map::DefaultHasher;
+use std::env;
+#[cfg(target_os = "macos")]
+use std::ffi::CString;
+use std::hash::{Hash, Hasher};
+#[cfg(target_os = "macos")]
+use std::mem::size_of;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+#[cfg(target_os = "macos")]
+use std::thread;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::error::BarrsError;
+
+const RIFT_BOOTSTRAP_NAME: &str = "git.acsandmann.rift";
+#[cfg(target_os = "macos")]
+const MAX_MESSAGE_SIZE: usize = 16_384;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -21,11 +34,87 @@ pub struct RiftSnapshot {
     pub window_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+impl RiftSnapshot {
+    pub fn signature(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.current_workspace.hash(&mut hasher);
+        self.layout.hash(&mut hasher);
+        self.window_count.hash(&mut hasher);
+        for workspace in &self.workspaces {
+            workspace.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct RiftWorkspace {
     pub name: String,
     pub is_current: bool,
     pub has_windows: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RiftEventKind {
+    WorkspaceChanged,
+    WindowsChanged,
+    StacksChanged,
+}
+
+impl RiftEventKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkspaceChanged => "workspace_changed",
+            Self::WindowsChanged => "windows_changed",
+            Self::StacksChanged => "stacks_changed",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RiftEvent {
+    pub kind: RiftEventKind,
+    pub payload: Value,
+}
+
+#[cfg(target_os = "macos")]
+type SubscriptionHandle = libc::mach_port_t;
+#[cfg(not(target_os = "macos"))]
+type SubscriptionHandle = u32;
+
+pub struct RiftSubscription {
+    receiver: mpsc::Receiver<RiftEvent>,
+    handles: Vec<SubscriptionHandle>,
+    _workers: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl RiftSubscription {
+    pub fn drain(&self) -> Vec<RiftEvent> {
+        self.receiver.try_iter().collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RiftApplyResult {
+    NoChange,
+    Updated,
+    RequiresResync,
+}
+
+pub fn apply_event(snapshot: &mut RiftSnapshot, event: &RiftEvent) -> RiftApplyResult {
+    match event.kind {
+        RiftEventKind::WorkspaceChanged => apply_workspace_changed(snapshot, &event.payload),
+        RiftEventKind::WindowsChanged => apply_windows_changed(snapshot, &event.payload),
+        RiftEventKind::StacksChanged => apply_stacks_changed(snapshot, &event.payload),
+    }
+}
+
+impl Drop for RiftSubscription {
+    fn drop(&mut self) {
+        for handle in &self.handles {
+            deallocate_port(*handle);
+        }
+    }
 }
 
 pub trait RiftBackend: Send + Sync {
@@ -57,57 +146,139 @@ impl RiftBackend for MachRiftBackend {
     }
 
     fn snapshot(&self) -> Result<RiftSnapshot, BarrsError> {
-        cli_snapshot().ok_or_else(|| {
-            BarrsError::Unsupported("failed to query workspace state from rift-cli".into())
-        })
+        #[cfg(target_os = "macos")]
+        {
+            mach_snapshot()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(BarrsError::Unsupported(
+                "Mach IPC is only supported on macOS".into(),
+            ))
+        }
     }
 }
 
 pub fn select_backend() -> Box<dyn RiftBackend> {
-    if Path::new("/tmp/rift.sock").exists() {
+    if mach_backend_available() {
         Box::new(MachRiftBackend)
     } else {
         Box::new(CliRiftBackend)
     }
 }
 
-fn cli_snapshot() -> Option<RiftSnapshot> {
-    let workspaces_value = run_rift_cli(["query", "workspaces"])?;
-    let mut workspaces = parse_workspaces(&workspaces_value);
-    for workspace in &mut workspaces {
-        if workspace.window_count.is_none() {
-            workspace.window_count = query_window_count(workspace.workspace_id, workspace.space_id);
+pub fn subscribe() -> Option<RiftSubscription> {
+    #[cfg(target_os = "macos")]
+    {
+        if !mach_backend_available() {
+            return None;
         }
-    }
-    workspaces.sort_by_key(|workspace| workspace.index.unwrap_or(usize::MAX));
-    let active = select_active_workspace(&workspaces)?;
-    let rendered_workspaces = workspaces
-        .iter()
-        .map(|workspace| RiftWorkspace {
-            name: workspace.display_name(),
-            is_current: workspace.active,
-            has_windows: workspace.window_count.unwrap_or(0) > 0,
+
+        let (sender, receiver) = mpsc::channel();
+        let mut handles = Vec::new();
+        let mut workers = Vec::new();
+
+        for kind in [
+            RiftEventKind::WorkspaceChanged,
+            RiftEventKind::WindowsChanged,
+            RiftEventKind::StacksChanged,
+        ] {
+            let client = MachClient::connect().ok()?;
+            let port = client.subscribe(kind).ok()?;
+            let thread_sender = sender.clone();
+            workers.push(thread::spawn(move || {
+                while let Ok(payload) = receive_json_message(port) {
+                    if thread_sender.send(RiftEvent { kind, payload }).is_err() {
+                        break;
+                    }
+                }
+            }));
+            handles.push(port);
+        }
+
+        Some(RiftSubscription {
+            receiver,
+            handles,
+            _workers: workers,
         })
-        .collect::<Vec<_>>();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
 
-    let layout = query_layout(active.space_id, active.workspace_id)
-        .or_else(|| active.layout.clone())
-        .unwrap_or_else(|| "tiling".into());
+#[cfg(target_os = "macos")]
+fn mach_snapshot() -> Result<RiftSnapshot, BarrsError> {
+    let client = MachClient::connect()?;
+    let workspaces_value = client.get_workspaces(None)?;
+    let mut workspaces = parse_workspaces(&workspaces_value);
+    workspaces.sort_by_key(|workspace| workspace.index.unwrap_or(usize::MAX));
+    let active = select_active_workspace(&workspaces)
+        .ok_or_else(|| BarrsError::Unsupported("Rift returned no workspaces".into()))?;
+    let layout = active.layout.clone().unwrap_or_else(|| "tiling".into());
+    let window_count = active.window_count.unwrap_or(0);
 
-    let window_count = active.window_count.unwrap_or_else(|| {
-        query_window_count(active.workspace_id, active.space_id).unwrap_or(0)
-    });
-
-    Some(RiftSnapshot {
+    Ok(RiftSnapshot {
         current_workspace: active.display_name(),
-        workspaces: if rendered_workspaces.is_empty() {
+        workspaces: if workspaces.is_empty() {
             vec![RiftWorkspace {
                 name: active.display_name(),
                 is_current: true,
                 has_windows: window_count > 0,
             }]
         } else {
-            rendered_workspaces
+            workspaces
+                .iter()
+                .map(|workspace| RiftWorkspace {
+                    name: workspace.display_name(),
+                    is_current: workspace.active,
+                    has_windows: workspace.window_count.unwrap_or(0) > 0,
+                })
+                .collect()
+        },
+        layout,
+        window_count,
+    })
+}
+
+fn mach_backend_available() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        MachClient::connect().is_ok()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+fn cli_snapshot() -> Option<RiftSnapshot> {
+    let workspaces_value = run_rift_cli(["query", "workspaces"])?;
+    let mut workspaces = parse_workspaces(&workspaces_value);
+    workspaces.sort_by_key(|workspace| workspace.index.unwrap_or(usize::MAX));
+    let active = select_active_workspace(&workspaces)?;
+
+    let layout = active.layout.clone().unwrap_or_else(|| "tiling".into());
+    let window_count = active.window_count.unwrap_or(0);
+
+    Some(RiftSnapshot {
+        current_workspace: active.display_name(),
+        workspaces: if workspaces.is_empty() {
+            vec![RiftWorkspace {
+                name: active.display_name(),
+                is_current: true,
+                has_windows: window_count > 0,
+            }]
+        } else {
+            workspaces
+                .iter()
+                .map(|workspace| RiftWorkspace {
+                    name: workspace.display_name(),
+                    is_current: workspace.active,
+                    has_windows: workspace.window_count.unwrap_or(0) > 0,
+                })
+                .collect()
         },
         layout,
         window_count,
@@ -115,7 +286,12 @@ fn cli_snapshot() -> Option<RiftSnapshot> {
 }
 
 fn run_rift_cli<const N: usize>(args: [&str; N]) -> Option<Value> {
-    let output = Command::new("rift-cli").args(args).output().ok()?;
+    let output = Command::new("rift-cli")
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -135,10 +311,12 @@ fn unwrap_response(value: Value) -> Option<Value> {
             return Some(inner.clone());
         }
     }
-    if let Some(success) = object.get("success").and_then(Value::as_object) {
-        for key in ["data", "payload", "result"] {
-            if let Some(inner) = success.get(key) {
-                return Some(inner.clone());
+    for key in ["success", "Success"] {
+        if let Some(success) = object.get(key).and_then(Value::as_object) {
+            for inner_key in ["data", "payload", "result"] {
+                if let Some(inner) = success.get(inner_key) {
+                    return Some(inner.clone());
+                }
             }
         }
     }
@@ -148,7 +326,6 @@ fn unwrap_response(value: Value) -> Option<Value> {
 #[derive(Debug, Clone, Default)]
 struct ParsedWorkspace {
     workspace_id: Option<u64>,
-    space_id: Option<u64>,
     name: Option<String>,
     index: Option<usize>,
     active: bool,
@@ -161,11 +338,7 @@ impl ParsedWorkspace {
     fn display_name(&self) -> String {
         self.index
             .map(|index| (index + 1).to_string())
-            .or_else(|| {
-                self.name
-                    .clone()
-                    .filter(|name| !name.trim().is_empty())
-            })
+            .or_else(|| self.name.clone().filter(|name| !name.trim().is_empty()))
             .or_else(|| self.workspace_id.map(|id| id.to_string()))
             .unwrap_or_else(|| "?".into())
     }
@@ -174,13 +347,11 @@ impl ParsedWorkspace {
 fn parse_workspaces(value: &Value) -> Vec<ParsedWorkspace> {
     match value {
         Value::Array(items) => items.iter().map(parse_workspace).collect(),
-        Value::Object(map) => {
-            if let Some(items) = map.get("workspaces").and_then(Value::as_array) {
-                items.iter().map(parse_workspace).collect()
-            } else {
-                Vec::new()
-            }
-        }
+        Value::Object(map) => map
+            .get("workspaces")
+            .and_then(Value::as_array)
+            .map(|items| items.iter().map(parse_workspace).collect())
+            .unwrap_or_default(),
         _ => Vec::new(),
     }
 }
@@ -188,13 +359,21 @@ fn parse_workspaces(value: &Value) -> Vec<ParsedWorkspace> {
 fn parse_workspace(value: &Value) -> ParsedWorkspace {
     ParsedWorkspace {
         workspace_id: find_u64(value, &["workspace_id", "id"]),
-        space_id: find_u64(value, &["space_id"]),
         name: find_string(value, &["workspace_name", "name", "label", "title"]),
         index: find_u64(value, &["workspace_index", "index"]).map(|value| value as usize),
         active: find_bool(value, &["active", "is_active", "focused", "current"]).unwrap_or(false),
         visible: find_bool(value, &["visible", "is_visible"]).unwrap_or(false),
         layout: find_string(value, &["layout", "layout_mode", "mode"]),
-        window_count: find_u64(value, &["window_count"]).map(|value| value as usize),
+        window_count: find_u64(value, &["window_count"])
+            .map(|value| value as usize)
+            .or_else(|| {
+                value.as_object().and_then(|object| {
+                    object
+                        .get("windows")
+                        .and_then(Value::as_array)
+                        .map(|windows| windows.len())
+                })
+            }),
     }
 }
 
@@ -206,22 +385,7 @@ fn select_active_workspace(workspaces: &[ParsedWorkspace]) -> Option<&ParsedWork
         .or_else(|| workspaces.first())
 }
 
-fn query_layout(space_id: Option<u64>, workspace_id: Option<u64>) -> Option<String> {
-    let value = if let Some(space_id) = space_id {
-        run_rift_cli(["query", "workspace-layout", "--space-id", &space_id.to_string()])?
-    } else if let Some(workspace_id) = workspace_id {
-        run_rift_cli([
-            "query",
-            "workspace-layout",
-            "--workspace-id",
-            &workspace_id.to_string(),
-        ])?
-    } else {
-        return None;
-    };
-    parse_layout_value(&value)
-}
-
+#[cfg(test)]
 fn parse_layout_value(value: &Value) -> Option<String> {
     if let Some(layout) = find_string(value, &["layout_mode", "layout", "mode"]) {
         return Some(layout);
@@ -234,15 +398,10 @@ fn parse_layout_value(value: &Value) -> Option<String> {
     }
 }
 
-fn query_window_count(workspace_id: Option<u64>, space_id: Option<u64>) -> Option<usize> {
-    let value = if let Some(space_id) = space_id {
-        run_rift_cli(["query", "windows", "--space-id", &space_id.to_string()])?
-    } else {
-        run_rift_cli(["query", "windows"])?
-    };
-
+#[cfg(test)]
+fn count_windows_in_value(value: &Value, workspace_id: Option<u64>, space_id: Option<u64>) -> usize {
     let windows = match value {
-        Value::Array(items) => items,
+        Value::Array(items) => items.clone(),
         Value::Object(map) => map
             .get("windows")
             .and_then(Value::as_array)
@@ -251,20 +410,18 @@ fn query_window_count(workspace_id: Option<u64>, space_id: Option<u64>) -> Optio
         _ => Vec::new(),
     };
 
-    Some(
-        windows
-            .iter()
-            .filter(|window| {
-                if let Some(target_workspace) = workspace_id {
-                    find_u64(window, &["workspace_id"]) == Some(target_workspace)
-                } else if let Some(target_space) = space_id {
-                    find_u64(window, &["space_id"]) == Some(target_space)
-                } else {
-                    true
-                }
-            })
-            .count(),
-    )
+    windows
+        .iter()
+        .filter(|window| {
+            if let Some(target_workspace) = workspace_id {
+                find_u64(window, &["workspace_id"]) == Some(target_workspace)
+            } else if let Some(target_space) = space_id {
+                find_u64(window, &["space_id"]) == Some(target_space)
+            } else {
+                true
+            }
+        })
+        .count()
 }
 
 fn find_string(value: &Value, keys: &[&str]) -> Option<String> {
@@ -297,14 +454,410 @@ fn find_bool(value: &Value, keys: &[&str]) -> Option<bool> {
     None
 }
 
+fn apply_workspace_changed(snapshot: &mut RiftSnapshot, payload: &Value) -> RiftApplyResult {
+    let Some(current_name) = workspace_index_name(payload) else {
+        return RiftApplyResult::RequiresResync;
+    };
+    let layout = find_string(payload, &["layout", "layout_mode", "mode"]);
+    let mut changed = false;
+
+    if snapshot.current_workspace != current_name {
+        snapshot.current_workspace = current_name.clone();
+        changed = true;
+    }
+
+    if let Some(layout) = layout.filter(|layout| !layout.trim().is_empty()) {
+        if snapshot.layout != layout {
+            snapshot.layout = layout;
+            changed = true;
+        }
+    }
+
+    for workspace in &mut snapshot.workspaces {
+        let is_current = workspace.name == current_name;
+        if workspace.is_current != is_current {
+            workspace.is_current = is_current;
+            changed = true;
+        }
+    }
+
+    if !snapshot.workspaces.iter().any(|workspace| workspace.name == current_name) {
+        return RiftApplyResult::RequiresResync;
+    }
+
+    snapshot.window_count = snapshot
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.is_current)
+        .map(|workspace| usize::from(workspace.has_windows))
+        .unwrap_or(snapshot.window_count);
+
+    if changed {
+        RiftApplyResult::Updated
+    } else {
+        RiftApplyResult::NoChange
+    }
+}
+
+fn apply_windows_changed(snapshot: &mut RiftSnapshot, payload: &Value) -> RiftApplyResult {
+    let Some(target_name) = workspace_index_name(payload) else {
+        return RiftApplyResult::RequiresResync;
+    };
+    let Some(window_count) = payload
+        .as_object()
+        .and_then(|object| object.get("windows"))
+        .and_then(Value::as_array)
+        .map(|windows| windows.len())
+        .or_else(|| find_u64(payload, &["window_count"]).map(|count| count as usize))
+    else {
+        return RiftApplyResult::RequiresResync;
+    };
+
+    let mut changed = false;
+    let mut found = false;
+
+    for workspace in &mut snapshot.workspaces {
+        if workspace.name == target_name {
+            found = true;
+            let has_windows = window_count > 0;
+            if workspace.has_windows != has_windows {
+                workspace.has_windows = has_windows;
+                changed = true;
+            }
+            if workspace.is_current && snapshot.window_count != window_count {
+                snapshot.window_count = window_count;
+                changed = true;
+            }
+            break;
+        }
+    }
+
+    if !found {
+        return RiftApplyResult::RequiresResync;
+    }
+
+    if changed {
+        RiftApplyResult::Updated
+    } else {
+        RiftApplyResult::NoChange
+    }
+}
+
+fn apply_stacks_changed(snapshot: &mut RiftSnapshot, payload: &Value) -> RiftApplyResult {
+    if let Some(current_name) = workspace_index_name(payload) {
+        let mut changed = false;
+        for workspace in &mut snapshot.workspaces {
+            let is_current = workspace.name == current_name;
+            if workspace.is_current != is_current {
+                workspace.is_current = is_current;
+                changed = true;
+            }
+        }
+        if changed {
+            snapshot.current_workspace = current_name;
+            return RiftApplyResult::Updated;
+        }
+        return RiftApplyResult::NoChange;
+    }
+    RiftApplyResult::RequiresResync
+}
+
+fn workspace_index_name(payload: &Value) -> Option<String> {
+    find_u64(payload, &["workspace_index", "index"]).map(|index| (index + 1).to_string())
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct MachMsgHeader {
+    msgh_bits: u32,
+    msgh_size: u32,
+    msgh_remote_port: libc::mach_port_t,
+    msgh_local_port: libc::mach_port_t,
+    msgh_voucher_port: u32,
+    msgh_id: i32,
+}
+
+#[cfg(target_os = "macos")]
+const MACH_PAYLOAD_CAPACITY: usize = MAX_MESSAGE_SIZE - size_of::<MachMsgHeader>();
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct SimpleMessage {
+    header: MachMsgHeader,
+    data: [u8; MACH_PAYLOAD_CAPACITY],
+}
+
+#[cfg(target_os = "macos")]
+struct MachClient {
+    service_port: libc::mach_port_t,
+}
+
+#[cfg(target_os = "macos")]
+impl MachClient {
+    fn connect() -> Result<Self, BarrsError> {
+        let service_name = CString::new(
+            env::var("RIFT_BS_NAME").unwrap_or_else(|_| RIFT_BOOTSTRAP_NAME.into()),
+        )
+        .map_err(|_| BarrsError::Unsupported("invalid Rift bootstrap name".into()))?;
+        let mut service_port = libc::MACH_PORT_NULL as libc::mach_port_t;
+        let result = unsafe {
+            bootstrap_look_up(bootstrap_port, service_name.as_ptr(), &mut service_port)
+        };
+        if result != 0 || service_port == libc::MACH_PORT_NULL as libc::mach_port_t {
+            return Err(BarrsError::Unsupported(
+                "failed to connect to Rift Mach service".into(),
+            ));
+        }
+        Ok(Self { service_port })
+    }
+
+    fn get_workspaces(&self, space_id: Option<u64>) -> Result<Value, BarrsError> {
+        self.request(json!({
+            "get_workspaces": { "space_id": space_id }
+        }))
+    }
+
+    fn subscribe(&self, event: RiftEventKind) -> Result<libc::mach_port_t, BarrsError> {
+        let reply_port = allocate_reply_port()?;
+        let response = send_request_on_port(
+            self.service_port,
+            reply_port,
+            json!({
+                "subscribe": { "event": event.as_str() }
+            }),
+        );
+        match response {
+            Ok(_) => Ok(reply_port),
+            Err(error) => {
+                deallocate_port(reply_port);
+                Err(error)
+            }
+        }
+    }
+
+    fn request(&self, request: Value) -> Result<Value, BarrsError> {
+        let reply_port = allocate_reply_port()?;
+        let response = send_request_on_port(self.service_port, reply_port, request);
+        deallocate_port(reply_port);
+        response
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for MachClient {
+    fn drop(&mut self) {
+        deallocate_port(self.service_port);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn send_request_on_port(
+    service_port: libc::mach_port_t,
+    reply_port: libc::mach_port_t,
+    request: Value,
+) -> Result<Value, BarrsError> {
+    let payload = serde_json::to_vec(&request)?;
+    send_json_message(service_port, Some(reply_port), &payload)?;
+    receive_response_message(reply_port)
+}
+
+#[cfg(target_os = "macos")]
+fn send_json_message(
+    service_port: libc::mach_port_t,
+    reply_port: Option<libc::mach_port_t>,
+    payload: &[u8],
+) -> Result<(), BarrsError> {
+    if payload.len() > MACH_PAYLOAD_CAPACITY {
+        return Err(BarrsError::Unsupported("Rift Mach payload exceeds 16KB".into()));
+    }
+    let aligned_len = (payload.len() + 3) & !3;
+    let mut message = SimpleMessage {
+        header: MachMsgHeader {
+            msgh_bits: mach_msg_bits(
+                MACH_MSG_TYPE_COPY_SEND,
+                if reply_port.is_some() {
+                    MACH_MSG_TYPE_MAKE_SEND
+                } else {
+                    0
+                },
+            ),
+            msgh_size: (size_of::<MachMsgHeader>() + aligned_len) as u32,
+            msgh_remote_port: service_port,
+            msgh_local_port: reply_port.unwrap_or(libc::MACH_PORT_NULL as libc::mach_port_t),
+            msgh_voucher_port: 0,
+            msgh_id: reply_port.unwrap_or(0) as i32,
+        },
+        data: [0; MACH_PAYLOAD_CAPACITY],
+    };
+    message.data[..payload.len()].copy_from_slice(payload);
+
+    let result = unsafe {
+        mach_msg(
+            &mut message.header,
+            MACH_SEND_MSG,
+            message.header.msgh_size,
+            0,
+            libc::MACH_PORT_NULL as libc::mach_port_t,
+            MACH_MSG_TIMEOUT_NONE,
+            libc::MACH_PORT_NULL as libc::mach_port_t,
+        )
+    };
+    if result != 0 {
+        return Err(BarrsError::Unsupported(format!(
+            "failed to send Rift Mach request ({result})"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn receive_response_message(reply_port: libc::mach_port_t) -> Result<Value, BarrsError> {
+    let payload = receive_payload(reply_port)?;
+    let value: Value = serde_json::from_slice(&payload)?;
+    unwrap_response(value).ok_or_else(|| {
+        BarrsError::Unsupported("failed to decode Rift Mach response".into())
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn receive_json_message(reply_port: libc::mach_port_t) -> Result<Value, BarrsError> {
+    let payload = receive_payload(reply_port)?;
+    serde_json::from_slice(&payload).map_err(BarrsError::from)
+}
+
+#[cfg(target_os = "macos")]
+fn receive_payload(reply_port: libc::mach_port_t) -> Result<Vec<u8>, BarrsError> {
+    let mut message = SimpleMessage {
+        header: MachMsgHeader {
+            msgh_bits: 0,
+            msgh_size: 0,
+            msgh_remote_port: 0,
+            msgh_local_port: 0,
+            msgh_voucher_port: 0,
+            msgh_id: 0,
+        },
+        data: [0; MACH_PAYLOAD_CAPACITY],
+    };
+
+    let result = unsafe {
+        mach_msg(
+            &mut message.header,
+            MACH_RCV_MSG,
+            0,
+            size_of::<SimpleMessage>() as u32,
+            reply_port,
+            MACH_MSG_TIMEOUT_NONE,
+            libc::MACH_PORT_NULL as libc::mach_port_t,
+        )
+    };
+    if result != 0 {
+        return Err(BarrsError::Unsupported(format!(
+            "failed to receive Rift Mach message ({result})"
+        )));
+    }
+
+    let payload_len = message
+        .header
+        .msgh_size
+        .saturating_sub(size_of::<MachMsgHeader>() as u32) as usize;
+    let mut payload = message.data[..payload_len.min(MACH_PAYLOAD_CAPACITY)].to_vec();
+    while payload.last() == Some(&0) {
+        payload.pop();
+    }
+    Ok(payload)
+}
+
+#[cfg(target_os = "macos")]
+fn allocate_reply_port() -> Result<libc::mach_port_t, BarrsError> {
+    let mut port = libc::MACH_PORT_NULL as libc::mach_port_t;
+    let result = unsafe {
+        mach_port_allocate(
+            mach_task_self_port(),
+            MACH_PORT_RIGHT_RECEIVE,
+            &mut port,
+        )
+    };
+    if result != 0 {
+        return Err(BarrsError::Unsupported(format!(
+            "failed to allocate Mach reply port ({result})"
+        )));
+    }
+    Ok(port)
+}
+
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn mach_task_self_port() -> libc::mach_port_t {
+    unsafe { libc::mach_task_self() }
+}
+
+fn deallocate_port(port: SubscriptionHandle) {
+    #[cfg(target_os = "macos")]
+    if port != libc::MACH_PORT_NULL as libc::mach_port_t {
+        unsafe {
+            let _ = mach_port_deallocate(mach_task_self_port(), port);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+const MACH_MSG_TYPE_COPY_SEND: u32 = 19;
+#[cfg(target_os = "macos")]
+const MACH_MSG_TYPE_MAKE_SEND: u32 = 20;
+#[cfg(target_os = "macos")]
+const MACH_SEND_MSG: i32 = 0x0000_0001;
+#[cfg(target_os = "macos")]
+const MACH_RCV_MSG: i32 = 0x0000_0002;
+#[cfg(target_os = "macos")]
+const MACH_MSG_TIMEOUT_NONE: u32 = 0;
+#[cfg(target_os = "macos")]
+const MACH_PORT_RIGHT_RECEIVE: u32 = 1;
+
+#[cfg(target_os = "macos")]
+const fn mach_msg_bits(remote: u32, local: u32) -> u32 {
+    remote | (local << 8)
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    static bootstrap_port: libc::mach_port_t;
+
+    fn bootstrap_look_up(
+        bp: libc::mach_port_t,
+        service_name: *const libc::c_char,
+        service_port: *mut libc::mach_port_t,
+    ) -> libc::kern_return_t;
+
+    fn mach_port_allocate(
+        task: libc::mach_port_t,
+        right: u32,
+        name: *mut libc::mach_port_t,
+    ) -> libc::kern_return_t;
+
+    fn mach_port_deallocate(
+        task: libc::mach_port_t,
+        name: libc::mach_port_t,
+    ) -> libc::kern_return_t;
+
+    fn mach_msg(
+        msg: *mut MachMsgHeader,
+        option: i32,
+        send_size: u32,
+        rcv_size: u32,
+        rcv_name: libc::mach_port_t,
+        timeout: u32,
+        notify: libc::mach_port_t,
+    ) -> libc::kern_return_t;
+}
+
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-    use serde_json::Value;
+    use serde_json::{Value, json};
 
     use super::{
-        CliRiftBackend, RiftBackend, RiftBackendKind, parse_layout_value, parse_workspaces,
-        query_window_count, select_active_workspace, unwrap_response,
+        CliRiftBackend, RiftApplyResult, RiftBackend, RiftBackendKind, RiftEvent, RiftEventKind,
+        RiftSnapshot, RiftWorkspace, apply_event, count_windows_in_value, parse_layout_value,
+        parse_workspaces, select_active_workspace, unwrap_response,
     };
 
     #[test]
@@ -325,7 +878,7 @@ mod tests {
     #[test]
     fn unwraps_success_response() {
         let value = unwrap_response(json!({
-            "success": {
+            "Success": {
                 "data": [
                     { "workspace_id": 1, "workspace_name": "1", "active": true }
                 ]
@@ -343,7 +896,7 @@ mod tests {
         ]));
         let active = select_active_workspace(&workspaces).expect("active workspace");
         assert_eq!(active.display_name(), "2");
-        assert_eq!(active.space_id, Some(7));
+        assert!(active.active);
     }
 
     #[test]
@@ -373,14 +926,98 @@ mod tests {
             { "workspace_id": 2, "space_id": 7 },
             { "workspace_id": 3, "space_id": 8 }
         ]);
-        let count = match value {
-            Value::Array(items) => items
-                .iter()
-                .filter(|window| super::find_u64(window, &["workspace_id"]) == Some(2))
-                .count(),
-            _ => 0,
+        assert_eq!(count_windows_in_value(&value, Some(2), None), 2);
+        let _ = match value {
+            Value::Array(_) => Some(()),
+            _ => None,
         };
-        assert_eq!(count, 2);
-        let _ = query_window_count(None, None);
+    }
+
+    #[test]
+    fn workspace_changed_event_updates_current_workspace() {
+        let mut snapshot = RiftSnapshot {
+            current_workspace: "1".into(),
+            workspaces: vec![
+                RiftWorkspace {
+                    name: "1".into(),
+                    is_current: true,
+                    has_windows: true,
+                },
+                RiftWorkspace {
+                    name: "2".into(),
+                    is_current: false,
+                    has_windows: false,
+                },
+            ],
+            layout: "tiling".into(),
+            window_count: 1,
+        };
+        let changed = apply_event(
+            &mut snapshot,
+            &RiftEvent {
+                kind: RiftEventKind::WorkspaceChanged,
+                payload: json!({ "workspace_index": 1, "layout_mode": "bsp" }),
+            },
+        );
+        assert_eq!(changed, RiftApplyResult::Updated);
+        assert_eq!(snapshot.current_workspace, "2");
+        assert_eq!(snapshot.layout, "bsp");
+        assert!(snapshot.workspaces[1].is_current);
+        assert!(!snapshot.workspaces[0].is_current);
+    }
+
+    #[test]
+    fn windows_changed_event_updates_occupied_state() {
+        let mut snapshot = RiftSnapshot {
+            current_workspace: "2".into(),
+            workspaces: vec![
+                RiftWorkspace {
+                    name: "1".into(),
+                    is_current: false,
+                    has_windows: false,
+                },
+                RiftWorkspace {
+                    name: "2".into(),
+                    is_current: true,
+                    has_windows: true,
+                },
+            ],
+            layout: "tiling".into(),
+            window_count: 1,
+        };
+        let changed = apply_event(
+            &mut snapshot,
+            &RiftEvent {
+                kind: RiftEventKind::WindowsChanged,
+                payload: json!({ "workspace_index": 0, "windows": ["a", "b"] }),
+            },
+        );
+        assert_eq!(changed, RiftApplyResult::Updated);
+        assert!(snapshot.workspaces[0].has_windows);
+        assert_eq!(snapshot.window_count, 1);
+    }
+
+    #[test]
+    fn name_only_event_requests_resync() {
+        let mut snapshot = RiftSnapshot {
+            current_workspace: "1".into(),
+            workspaces: vec![RiftWorkspace {
+                name: "1".into(),
+                is_current: true,
+                has_windows: true,
+            }],
+            layout: "tiling".into(),
+            window_count: 1,
+        };
+        let result = apply_event(
+            &mut snapshot,
+            &RiftEvent {
+                kind: RiftEventKind::WorkspaceChanged,
+                payload: json!({ "workspace_name": "Main" }),
+            },
+        );
+        assert_eq!(result, RiftApplyResult::RequiresResync);
+        assert_eq!(snapshot.workspaces.len(), 1);
+        assert_eq!(snapshot.current_workspace, "1");
     }
 }
