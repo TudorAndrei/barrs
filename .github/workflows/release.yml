@@ -115,7 +115,7 @@ jobs:
           set -euxo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet -- Formula/barrs.rb; then
+          if [ -z "$(git status --short -- Formula/barrs.rb)" ]; then
             exit 0
           fi
           git add Formula/barrs.rb
