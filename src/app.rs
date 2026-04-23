@@ -18,6 +18,15 @@ pub async fn run(cli: Cli) -> Result<(), BarrsError> {
         Command::Start(args) => {
             let config_path = resolve_config_path(args.config);
             ensure_config_exists(&config_path)?;
+            if cfg!(debug_assertions) {
+                let config = config::load_config(&config_path)?;
+                let daemon = Daemon::new(
+                    config_path,
+                    apply_socket_override(config, args.socket),
+                    create_renderer(crate::render::RendererKind::Native)?,
+                )?;
+                return daemon.run().await;
+            }
             spawn_background_process(RunArgs {
                 config: Some(config_path.clone()),
                 socket: args.socket,
