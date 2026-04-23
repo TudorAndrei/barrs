@@ -16,7 +16,7 @@ use objc2_foundation::{MainThreadMarker, NSDefaultRunLoopMode, NSPoint, NSRect, 
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSEvent,
-    NSEventMask, NSEventModifierFlags, NSEventType, NSFont, NSMainMenuWindowLevel, NSPanel,
+    NSEventMask, NSEventModifierFlags, NSEventType, NSFont, NSNormalWindowLevel, NSPanel,
     NSScreen, NSStatusWindowLevel, NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
 
@@ -828,7 +828,7 @@ fn create_bar_window(
     window.setHasShadow(false);
     window.setMovableByWindowBackground(false);
     window.setAcceptsMouseMovedEvents(true);
-    window.setLevel(NSMainMenuWindowLevel);
+    window.setLevel(NSNormalWindowLevel);
     apply_window_background(&window, background);
     Ok(window)
 }
