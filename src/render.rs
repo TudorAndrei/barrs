@@ -16,8 +16,8 @@ use objc2_foundation::{MainThreadMarker, NSDefaultRunLoopMode, NSPoint, NSRect, 
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSEvent,
-    NSEventMask, NSEventModifierFlags, NSEventType, NSFloatingWindowLevel, NSFont, NSPanel,
-    NSScreen, NSStatusWindowLevel, NSTextField, NSView, NSWindow, NSWindowStyleMask,
+    NSEventMask, NSEventModifierFlags, NSEventType, NSFont, NSPanel, NSScreen,
+    NSStatusWindowLevel, NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
 
 const ITEM_HORIZONTAL_PADDING: f64 = 12.0;
@@ -828,7 +828,7 @@ fn create_bar_window(
     window.setHasShadow(false);
     window.setMovableByWindowBackground(false);
     window.setAcceptsMouseMovedEvents(true);
-    window.setLevel(NSFloatingWindowLevel);
+    window.setLevel(NSStatusWindowLevel);
     apply_window_background(&window, background);
     Ok(window)
 }
@@ -1059,10 +1059,9 @@ fn anchor_bar_frame(frame: &WindowFrame, mtm: MainThreadMarker) -> WindowFrame {
         return frame.clone();
     };
     let full = screen.frame();
-    let visible = screen.visibleFrame();
     WindowFrame {
         x: full.origin.x,
-        y: visible.origin.y + visible.size.height,
+        y: full.origin.y + full.size.height - frame.height,
         width: full.size.width,
         height: frame.height,
     }
