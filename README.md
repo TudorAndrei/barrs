@@ -132,6 +132,37 @@ barrs rift backend
 barrs item trigger <item-id> <event>
 ```
 
+## Releases
+
+Releases should be created with `cargo-release` so the crate version, git tag, and published binary version stay in sync.
+
+Install it once:
+
+```bash
+cargo install cargo-release
+```
+
+Dry run the next patch release:
+
+```bash
+cargo release patch
+```
+
+Execute the release:
+
+```bash
+cargo release patch --execute
+```
+
+This repository uses [release.toml](./release.toml) to:
+
+- create tags as `v{{version}}`
+- create a release commit before tagging
+- push the branch and tag to `origin`
+- skip `cargo publish`, since GitHub Actions handles packaging and the Homebrew formula update
+
+After the tag is pushed, GitHub Actions builds the macOS archives, publishes the GitHub release assets, and updates `Formula/barrs.rb`.
+
 ## Notes
 
 - The bar is top-mounted only.
