@@ -16,9 +16,19 @@ use objc2_foundation::{MainThreadMarker, NSDefaultRunLoopMode, NSPoint, NSRect, 
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSEvent,
-    NSEventMask, NSEventModifierFlags, NSEventType, NSFont, NSPanel, NSScreen,
-    NSStatusWindowLevel, NSTextField, NSView, NSWindow, NSWindowStyleMask,
+    NSEventMask, NSEventModifierFlags, NSEventType, NSFont, NSMainMenuWindowLevel, NSPanel,
+    NSScreen, NSStatusWindowLevel, NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
+
+#[cfg(target_os = "macos")]
+#[link(name = "SkyLight", kind = "framework")]
+unsafe extern "C" {
+    fn SLSMainConnectionID() -> u32;
+    fn SLSSetWindowLevel(cid: u32, wid: u32, level: i32) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+const BACKSTOP_MENU_LEVEL: i32 = -20;
 
 const ITEM_HORIZONTAL_PADDING: f64 = 12.0;
 const CHARACTER_WIDTH: f64 = 9.5;
@@ -654,6 +664,7 @@ impl AppKitHost {
             apply_window_background(window, self.background.as_deref());
             window.setFrame_display(ns_rect(&anchored), true);
             window.orderFrontRegardless();
+            apply_backstop_level(window);
         }
         if let Some(content_view) = &self.content_view {
             content_view.setFrame(ns_rect(frame));
@@ -828,9 +839,21 @@ fn create_bar_window(
     window.setHasShadow(false);
     window.setMovableByWindowBackground(false);
     window.setAcceptsMouseMovedEvents(true);
-    window.setLevel(NSStatusWindowLevel);
+    window.setLevel(NSMainMenuWindowLevel);
     apply_window_background(&window, background);
     Ok(window)
+}
+
+#[cfg(target_os = "macos")]
+fn apply_backstop_level(window: &NSWindow) {
+    let window_id = window.windowNumber() as u32;
+    if window_id == 0 {
+        return;
+    }
+    unsafe {
+        let cid = SLSMainConnectionID();
+        SLSSetWindowLevel(cid, window_id, BACKSTOP_MENU_LEVEL);
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1059,9 +1082,17 @@ fn anchor_bar_frame(frame: &WindowFrame, mtm: MainThreadMarker) -> WindowFrame {
         return frame.clone();
     };
     let full = screen.frame();
+    let visible = screen.visibleFrame();
+    let visible_top = visible.origin.y + visible.size.height;
+    let full_top = full.origin.y + full.size.height;
+    let y = if visible_top < full_top {
+        visible_top
+    } else {
+        full_top - frame.height
+    };
     WindowFrame {
         x: full.origin.x,
-        y: full.origin.y + full.size.height - frame.height,
+        y,
         width: full.size.width,
         height: frame.height,
     }
