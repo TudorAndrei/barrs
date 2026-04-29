@@ -22,7 +22,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
@@ -45,7 +45,7 @@ jobs:
           shasum -a 256 "${archive}" | awk '{print $1}' > "${archive}.sha256"
 
       - name: Upload packaged archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}-release
           path: |
@@ -59,12 +59,12 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: dist
 
@@ -74,7 +74,7 @@ jobs:
           find dist -mindepth 2 -type f -exec mv {} dist/ \;
 
       - name: Publish GitHub release assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/*.tar.gz
