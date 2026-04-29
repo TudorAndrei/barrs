@@ -110,7 +110,7 @@ Configuration is written in Lua and currently covers:
 - hover tooltips
 - click and hover handlers
 
-Items backed by built-in plugins only refresh on an interval if you set `interval` on that item. Example:
+Built-in `time`, `cpu`, `gpu`, and `battery` items now refresh automatically with sane defaults. Set `interval` on an item to override that default. Example:
 
 ```lua
 {
@@ -121,7 +121,7 @@ Items backed by built-in plugins only refresh on an interval if you set `interva
 }
 ```
 
-The bundled default config sets sensible intervals for `cpu`, `gpu`, `battery`, and `time`.
+The bundled default config also sets explicit intervals for `cpu`, `gpu`, `battery`, and `time`.
 
 ## Built-in plugins
 

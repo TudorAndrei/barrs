@@ -447,6 +447,9 @@ fn item_refresh_interval(item: &ItemConfig, backend: RiftBackendKind) -> Option<
     item.interval
         .map(|interval| Duration::from_secs(interval.max(1)))
         .or(match item.plugin.as_ref().map(|plugin| plugin.kind) {
+        Some(PluginKind::Time) => Some(Duration::from_secs(1)),
+        Some(PluginKind::Cpu | PluginKind::Gpu) => Some(Duration::from_secs(2)),
+        Some(PluginKind::Battery) => Some(Duration::from_secs(10)),
         Some(PluginKind::RiftWorkspaces | PluginKind::RiftLayout) => {
             if backend == RiftBackendKind::Cli {
                 Some(Duration::from_millis(250))
@@ -693,6 +696,49 @@ return {{
         assert_eq!(
             super::item_refresh_interval(&item, crate::rift::RiftBackendKind::Mach),
             None
+        );
+    }
+
+    #[test]
+    fn builtin_items_use_default_intervals() {
+        let make_item = |kind| crate::config::ItemConfig {
+            id: "item".into(),
+            label: None,
+            icon: None,
+            placement: None,
+            interval: None,
+            plugin: Some(crate::config::PluginBinding { kind }),
+            hover: None,
+            handlers: crate::config::ItemHandlers::default(),
+        };
+
+        assert_eq!(
+            super::item_refresh_interval(
+                &make_item(crate::config::PluginKind::Time),
+                crate::rift::RiftBackendKind::Mach
+            ),
+            Some(std::time::Duration::from_secs(1))
+        );
+        assert_eq!(
+            super::item_refresh_interval(
+                &make_item(crate::config::PluginKind::Cpu),
+                crate::rift::RiftBackendKind::Mach
+            ),
+            Some(std::time::Duration::from_secs(2))
+        );
+        assert_eq!(
+            super::item_refresh_interval(
+                &make_item(crate::config::PluginKind::Gpu),
+                crate::rift::RiftBackendKind::Mach
+            ),
+            Some(std::time::Duration::from_secs(2))
+        );
+        assert_eq!(
+            super::item_refresh_interval(
+                &make_item(crate::config::PluginKind::Battery),
+                crate::rift::RiftBackendKind::Mach
+            ),
+            Some(std::time::Duration::from_secs(10))
         );
     }
 }
