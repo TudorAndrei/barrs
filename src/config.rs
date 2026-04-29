@@ -65,8 +65,8 @@ pub struct ItemConfig {
     pub icon: Option<String>,
     #[serde(default)]
     pub placement: Option<String>,
-    #[serde(default)]
-    pub refresh_secs: Option<u64>,
+    #[serde(default, alias = "refresh_secs")]
+    pub interval: Option<u64>,
     #[serde(default)]
     pub plugin: Option<PluginBinding>,
     #[serde(default)]
@@ -207,7 +207,7 @@ return {
     {
       id = "clock",
       label = "clock",
-      refresh_secs = 5,
+      interval = 5,
       plugin = { kind = "time" },
       handlers = { click = "handle_click" },
       hover = { tooltip = "Current time" }

@@ -292,7 +292,7 @@ mod tests {
             label: None,
             icon: None,
             placement: None,
-            refresh_secs: Some(1),
+            interval: Some(1),
             plugin: Some(PluginBinding {
                 kind: PluginKind::Cpu,
             }),
@@ -312,7 +312,7 @@ mod tests {
             label: None,
             icon: None,
             placement: None,
-            refresh_secs: Some(1),
+            interval: Some(1),
             plugin: Some(PluginBinding {
                 kind: PluginKind::RiftWorkspaces,
             }),
@@ -387,7 +387,7 @@ mod tests {
             label: None,
             icon: None,
             placement: None,
-            refresh_secs: Some(1),
+            interval: Some(1),
             plugin: Some(PluginBinding {
                 kind: PluginKind::Time,
             }),

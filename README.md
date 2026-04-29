@@ -105,9 +105,23 @@ Configuration is written in Lua and currently covers:
 - global item spacing
 - item order and placement
 - icons and labels
+- per-item refresh intervals with `interval`
 - built-in plugin bindings
 - hover tooltips
 - click and hover handlers
+
+Items backed by built-in plugins only refresh on an interval if you set `interval` on that item. Example:
+
+```lua
+{
+  id = "time",
+  icon = "󰥔",
+  interval = 1,
+  plugin = { kind = "time" },
+}
+```
+
+The bundled default config sets sensible intervals for `cpu`, `gpu`, `battery`, and `time`.
 
 ## Built-in plugins
 

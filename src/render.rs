@@ -1408,7 +1408,7 @@ mod tests {
             label: Some("CPU".into()),
             icon: Some("􀧓".into()),
             placement: Some("left".into()),
-            refresh_secs: Some(1),
+            interval: Some(1),
             plugin: None,
             hover: Some(HoverConfig {
                 tooltip: Some("CPU usage".into()),

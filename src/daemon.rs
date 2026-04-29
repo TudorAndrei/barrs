@@ -444,8 +444,8 @@ fn build_refresh_deadlines(
 }
 
 fn item_refresh_interval(item: &ItemConfig, backend: RiftBackendKind) -> Option<Duration> {
-    item.refresh_secs
-        .map(|refresh_secs| Duration::from_secs(refresh_secs.max(1)))
+    item.interval
+        .map(|interval| Duration::from_secs(interval.max(1)))
         .or(match item.plugin.as_ref().map(|plugin| plugin.kind) {
         Some(PluginKind::RiftWorkspaces | PluginKind::RiftLayout) => {
             if backend == RiftBackendKind::Cli {
@@ -589,7 +589,7 @@ return {{
     {{
       id = "clock",
       plugin = {{ kind = "time" }},
-      refresh_secs = 1
+      interval = 1
     }}
   }}
 }}
@@ -678,7 +678,7 @@ return {{
             label: None,
             icon: None,
             placement: None,
-            refresh_secs: None,
+            interval: None,
             plugin: Some(crate::config::PluginBinding {
                 kind: crate::config::PluginKind::RiftWorkspaces,
             }),
