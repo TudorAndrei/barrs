@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
@@ -39,8 +39,6 @@ const ITEM_TEXT_HEIGHT: f64 = 18.0;
 const ITEM_TRAILING_TEXT_PADDING: f64 = 8.0;
 const BAR_HEIGHT: f64 = 28.0;
 const DEFAULT_ITEM_SPACING: f64 = 6.0;
-const HOVER_PANEL_LIFETIME: Duration = Duration::from_secs(3);
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum RendererKind {
     Native,
@@ -442,7 +440,6 @@ struct AppKitHost {
     content_view: Option<objc2::rc::Retained<NSView>>,
     hover_panel: Option<objc2::rc::Retained<NSPanel>>,
     hover_label: Option<objc2::rc::Retained<NSTextField>>,
-    hover_shown_at: Option<Instant>,
     item_views: HashMap<String, AppKitItemView>,
     pending_events: Vec<EventPayload>,
     pointer_item: Option<String>,
@@ -462,7 +459,6 @@ impl Default for AppKitHost {
             content_view: None,
             hover_panel: None,
             hover_label: None,
-            hover_shown_at: None,
             item_views: HashMap::new(),
             pending_events: Vec::new(),
             pointer_item: None,
@@ -501,6 +497,8 @@ impl NativeHost for AppKitHost {
 
     fn drain_events(&mut self) -> Result<Vec<EventPayload>, BarrsError> {
         self.pump_events()?;
+        let hover_events = self.poll_hover_payloads();
+        self.pending_events.extend(hover_events);
         Ok(std::mem::take(&mut self.pending_events))
     }
 }
@@ -508,7 +506,6 @@ impl NativeHost for AppKitHost {
 #[cfg(target_os = "macos")]
 impl AppKitHost {
     fn pump_events(&mut self) -> Result<(), BarrsError> {
-        self.dismiss_expired_hover_panel();
         let Some(app) = self.app.clone() else {
             return Ok(());
         };
@@ -537,14 +534,6 @@ impl AppKitHost {
     fn event_payloads(&mut self, event: &NSEvent) -> Vec<EventPayload> {
         let target = self.hit_test_event(event);
         match event.r#type() {
-            NSEventType::MouseMoved | NSEventType::LeftMouseDragged | NSEventType::RightMouseDragged => {
-                if let Some(target) = target {
-                    self.hover_payloads(target, event)
-                } else {
-                    self.dismiss_hover_panel();
-                    Vec::new()
-                }
-            }
             NSEventType::LeftMouseDown => {
                 if let Some(target) = target {
                     vec![event_payload(target, EventKind::Click, event, Some("left".into()), None)]
@@ -584,29 +573,49 @@ impl AppKitHost {
         }
     }
 
-    fn hover_payloads(&mut self, next_item: String, event: &NSEvent) -> Vec<EventPayload> {
-        let mut payloads = Vec::new();
-        if self.pointer_item.as_deref() != Some(next_item.as_str()) {
-            if let Some(previous) = self.pointer_item.replace(next_item.clone()) {
-                payloads.push(event_payload(previous, EventKind::HoverLeave, event, None, None));
+    fn poll_hover_payloads(&mut self) -> Vec<EventPayload> {
+        let Some(window) = &self.window else {
+            return Vec::new();
+        };
+
+        let location = window.mouseLocationOutsideOfEventStream();
+        let next_item = self.last_scene.as_ref().and_then(|scene| {
+            scene.items.iter().find_map(|item| {
+                if item.frame.contains(location.x, location.y) {
+                    Some(item.snapshot.id.clone())
+                } else {
+                    None
+                }
+            })
+        });
+
+        match (self.pointer_item.clone(), next_item) {
+            (Some(previous), Some(next)) if previous == next => {
+                vec![synthetic_event_payload(next, EventKind::HoverUpdate, location.x, location.y)]
             }
-            payloads.push(event_payload(
-                next_item,
-                EventKind::HoverEnter,
-                event,
-                None,
-                None,
-            ));
-        } else {
-            payloads.push(event_payload(
-                next_item,
-                EventKind::HoverUpdate,
-                event,
-                None,
-                None,
-            ));
+            (Some(previous), Some(next)) => {
+                self.pointer_item = Some(next.clone());
+                vec![
+                    synthetic_event_payload(previous, EventKind::HoverLeave, location.x, location.y),
+                    synthetic_event_payload(next, EventKind::HoverEnter, location.x, location.y),
+                ]
+            }
+            (None, Some(next)) => {
+                self.pointer_item = Some(next.clone());
+                vec![synthetic_event_payload(next, EventKind::HoverEnter, location.x, location.y)]
+            }
+            (Some(previous), None) => {
+                self.pointer_item = None;
+                self.dismiss_hover_panel();
+                vec![synthetic_event_payload(
+                    previous,
+                    EventKind::HoverLeave,
+                    location.x,
+                    location.y,
+                )]
+            }
+            (None, None) => Vec::new(),
         }
-        payloads
     }
 
     fn hit_test_event(&self, event: &NSEvent) -> Option<String> {
@@ -770,7 +779,6 @@ impl AppKitHost {
             panel_window.setFrame_display(ns_rect(&frame), true);
             panel_window.orderFrontRegardless();
         }
-        self.hover_shown_at = Some(Instant::now());
         Ok(())
     }
 
@@ -778,22 +786,11 @@ impl AppKitHost {
         if let Some(panel) = &self.hover_panel {
             panel.orderOut(None);
         }
-        self.hover_shown_at = None;
     }
 
     fn dismiss_hover_panel(&mut self) {
         self.pointer_item = None;
         self.hide_hover_panel();
-    }
-
-    fn dismiss_expired_hover_panel(&mut self) {
-        let expired = self
-            .hover_shown_at
-            .map(|shown_at| shown_at.elapsed() >= HOVER_PANEL_LIFETIME)
-            .unwrap_or(false);
-        if expired {
-            self.dismiss_hover_panel();
-        }
     }
 }
 
@@ -1385,6 +1382,25 @@ fn event_payload(
             option: flags.contains(NSEventModifierFlags::Option),
             command: flags.contains(NSEventModifierFlags::Command),
         },
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn synthetic_event_payload(item_id: String, event: EventKind, x: f64, y: f64) -> EventPayload {
+    EventPayload {
+        item_id,
+        event,
+        timestamp_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+        mouse: crate::ipc::MouseState {
+            x: x.round() as i32,
+            y: y.round() as i32,
+            button: None,
+            scroll_delta: None,
+        },
+        modifiers: crate::ipc::Modifiers::default(),
     }
 }
 

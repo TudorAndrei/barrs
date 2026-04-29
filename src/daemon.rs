@@ -407,14 +407,27 @@ impl<R: Renderer> Daemon<R> {
 
         invoke_lua_handler(&self.config_path, &item, &payload)?;
 
-        if let Some(mut plugin) = from_item_config(&item, select_backend().snapshot().ok().as_ref())
         {
-            plugin.handle_event(&payload)?;
-            let snapshot = RenderItemSnapshot::from_item_config(&item, order, plugin.snapshot()?);
             let mut state = self.state.lock().await;
             state.renderer.handle_event(&payload)?;
-            state.renderer.render_item(&snapshot)?;
-            state.item_states.insert(item.id.clone(), snapshot);
+        }
+
+        if !matches!(
+            payload.event,
+            crate::ipc::EventKind::HoverEnter
+                | crate::ipc::EventKind::HoverLeave
+                | crate::ipc::EventKind::HoverUpdate
+        ) {
+            if let Some(mut plugin) =
+                from_item_config(&item, select_backend().snapshot().ok().as_ref())
+            {
+                plugin.handle_event(&payload)?;
+                let snapshot =
+                    RenderItemSnapshot::from_item_config(&item, order, plugin.snapshot()?);
+                let mut state = self.state.lock().await;
+                state.renderer.render_item(&snapshot)?;
+                state.item_states.insert(item.id.clone(), snapshot);
+            }
         }
 
         Ok(())
@@ -529,7 +542,7 @@ mod tests {
 
     use crate::config::load_config;
     use crate::ipc::{Request, Response, default_socket_path, send_request};
-    use crate::render::{NoopRenderer, Renderer};
+    use crate::render::{NativeRenderer, NoopRenderer, Renderer};
 
     use super::Daemon;
 
@@ -593,6 +606,28 @@ return {{
       id = "clock",
       plugin = {{ kind = "time" }},
       interval = 1
+    }}
+  }}
+}}
+"#,
+                socket_path.display()
+            ),
+        )
+        .expect("write config");
+    }
+
+    fn write_hover_config(path: &Path, socket_path: &Path) {
+        fs::write(
+            path,
+            format!(
+                r#"
+return {{
+  socket_path = "{}",
+  items = {{
+    {{
+      id = "clock",
+      label = "clock",
+      hover = {{ tooltip = "Current time" }}
     }}
   }}
 }}
@@ -672,6 +707,77 @@ return {{
         task.await.expect("join").expect("daemon result");
 
         assert!(renders.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn daemon_updates_hover_state_for_items_without_plugins() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("barrs.sock");
+        let config_path = dir.path().join("barrs.lua");
+        write_hover_config(&config_path, &socket_path);
+
+        let config = load_config(&config_path).expect("config");
+        let mut daemon =
+            Daemon::new(config_path.clone(), config, NativeRenderer::default()).expect("daemon");
+        daemon.refresh_all_items().await.expect("initial render");
+
+        daemon
+            .dispatch_event(crate::ipc::EventPayload {
+                item_id: "clock".into(),
+                event: crate::ipc::EventKind::HoverEnter,
+                timestamp_ms: 0,
+                mouse: crate::ipc::MouseState {
+                    x: 10,
+                    y: 10,
+                    button: None,
+                    scroll_delta: None,
+                },
+                modifiers: crate::ipc::Modifiers::default(),
+            })
+            .await
+            .expect("hover event");
+
+        let state = daemon.state.lock().await;
+        assert_eq!(
+            state.renderer.surface_state().active_hover_item.as_deref(),
+            Some("clock")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn daemon_does_not_rerender_plugin_items_for_hover_events() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("barrs.sock");
+        let config_path = dir.path().join("barrs.lua");
+        write_refreshing_config(&config_path, &socket_path);
+
+        let renders = Arc::new(AtomicUsize::new(0));
+        let renderer = CountingRenderer {
+            renders: Arc::clone(&renders),
+        };
+
+        let config = load_config(&config_path).expect("config");
+        let mut daemon = Daemon::new(config_path.clone(), config, renderer).expect("daemon");
+        daemon.refresh_all_items().await.expect("initial render");
+        assert_eq!(renders.load(Ordering::SeqCst), 1);
+
+        daemon
+            .dispatch_event(crate::ipc::EventPayload {
+                item_id: "clock".into(),
+                event: crate::ipc::EventKind::HoverUpdate,
+                timestamp_ms: 0,
+                mouse: crate::ipc::MouseState {
+                    x: 10,
+                    y: 10,
+                    button: None,
+                    scroll_delta: None,
+                },
+                modifiers: crate::ipc::Modifiers::default(),
+            })
+            .await
+            .expect("hover update");
+
+        assert_eq!(renders.load(Ordering::SeqCst), 1);
     }
 
     #[test]
