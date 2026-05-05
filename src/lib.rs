@@ -5,5 +5,6 @@ pub mod daemon;
 pub mod error;
 pub mod ipc;
 pub mod plugin;
+mod process;
 pub mod render;
 pub mod rift;

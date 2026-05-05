@@ -5,19 +5,23 @@ use std::ffi::CString;
 use std::hash::{Hash, Hasher};
 #[cfg(target_os = "macos")]
 use std::mem::size_of;
-use std::process::{Command, Stdio};
 use std::sync::mpsc;
 #[cfg(target_os = "macos")]
 use std::thread;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::error::BarrsError;
+use crate::process::run_command_with_timeout;
 
 const RIFT_BOOTSTRAP_NAME: &str = "git.acsandmann.rift";
+const RIFT_CLI_TIMEOUT: Duration = Duration::from_secs(1);
 #[cfg(target_os = "macos")]
 const MAX_MESSAGE_SIZE: usize = 16_384;
+#[cfg(target_os = "macos")]
+const RIFT_MACH_TIMEOUT_MS: u32 = 1_000;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -286,12 +290,7 @@ fn cli_snapshot() -> Option<RiftSnapshot> {
 }
 
 fn run_rift_cli<const N: usize>(args: [&str; N]) -> Option<Value> {
-    let output = Command::new("rift-cli")
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+    let output = run_command_with_timeout("rift-cli", &args, RIFT_CLI_TIMEOUT)?;
     if !output.status.success() {
         return None;
     }
@@ -694,11 +693,11 @@ fn send_json_message(
     let result = unsafe {
         mach_msg(
             &mut message.header,
-            MACH_SEND_MSG,
+            MACH_SEND_MSG | MACH_SEND_TIMEOUT,
             message.header.msgh_size,
             0,
             libc::MACH_PORT_NULL as libc::mach_port_t,
-            MACH_MSG_TIMEOUT_NONE,
+            RIFT_MACH_TIMEOUT_MS,
             libc::MACH_PORT_NULL as libc::mach_port_t,
         )
     };
@@ -712,7 +711,7 @@ fn send_json_message(
 
 #[cfg(target_os = "macos")]
 fn receive_response_message(reply_port: libc::mach_port_t) -> Result<Value, BarrsError> {
-    let payload = receive_payload(reply_port)?;
+    let payload = receive_payload(reply_port, Some(RIFT_MACH_TIMEOUT_MS))?;
     let value: Value = serde_json::from_slice(&payload)?;
     unwrap_response(value).ok_or_else(|| {
         BarrsError::Unsupported("failed to decode Rift Mach response".into())
@@ -721,12 +720,15 @@ fn receive_response_message(reply_port: libc::mach_port_t) -> Result<Value, Barr
 
 #[cfg(target_os = "macos")]
 fn receive_json_message(reply_port: libc::mach_port_t) -> Result<Value, BarrsError> {
-    let payload = receive_payload(reply_port)?;
+    let payload = receive_payload(reply_port, None)?;
     serde_json::from_slice(&payload).map_err(BarrsError::from)
 }
 
 #[cfg(target_os = "macos")]
-fn receive_payload(reply_port: libc::mach_port_t) -> Result<Vec<u8>, BarrsError> {
+fn receive_payload(
+    reply_port: libc::mach_port_t,
+    timeout_ms: Option<u32>,
+) -> Result<Vec<u8>, BarrsError> {
     let mut message = SimpleMessage {
         header: MachMsgHeader {
             msgh_bits: 0,
@@ -739,14 +741,20 @@ fn receive_payload(reply_port: libc::mach_port_t) -> Result<Vec<u8>, BarrsError>
         data: [0; MACH_PAYLOAD_CAPACITY],
     };
 
+    let options = MACH_RCV_MSG
+        | if timeout_ms.is_some() {
+            MACH_RCV_TIMEOUT
+        } else {
+            0
+        };
     let result = unsafe {
         mach_msg(
             &mut message.header,
-            MACH_RCV_MSG,
+            options,
             0,
             size_of::<SimpleMessage>() as u32,
             reply_port,
-            MACH_MSG_TIMEOUT_NONE,
+            timeout_ms.unwrap_or(MACH_MSG_TIMEOUT_NONE),
             libc::MACH_PORT_NULL as libc::mach_port_t,
         )
     };
@@ -808,6 +816,10 @@ const MACH_MSG_TYPE_MAKE_SEND: u32 = 20;
 const MACH_SEND_MSG: i32 = 0x0000_0001;
 #[cfg(target_os = "macos")]
 const MACH_RCV_MSG: i32 = 0x0000_0002;
+#[cfg(target_os = "macos")]
+const MACH_SEND_TIMEOUT: i32 = 0x0000_0010;
+#[cfg(target_os = "macos")]
+const MACH_RCV_TIMEOUT: i32 = 0x0000_0100;
 #[cfg(target_os = "macos")]
 const MACH_MSG_TIMEOUT_NONE: u32 = 0;
 #[cfg(target_os = "macos")]

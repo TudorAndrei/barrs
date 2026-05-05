@@ -1,13 +1,15 @@
 use std::ffi::CStr;
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
 use crate::config::{ItemConfig, PluginKind};
 use crate::error::BarrsError;
 use crate::ipc::EventPayload;
+use crate::process::run_command_with_timeout;
 use crate::rift::{RiftSnapshot, RiftWorkspace};
+
+const SYSTEM_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub trait Plugin: Send + Sync {
     fn snapshot(&self) -> Result<Value, BarrsError>;
@@ -93,10 +95,8 @@ impl Plugin for GpuPlugin {
 fn cpu_snapshot_from_top() -> Option<Value> {
     #[cfg(target_os = "macos")]
     {
-        let output = Command::new("top")
-            .args(["-l", "2", "-n", "0"])
-            .output()
-            .ok()?;
+        let output =
+            run_command_with_timeout("top", &["-l", "2", "-n", "0"], SYSTEM_QUERY_TIMEOUT)?;
         if !output.status.success() {
             return None;
         }
@@ -162,7 +162,7 @@ fn format_local_time() -> Result<String, BarrsError> {
 fn battery_snapshot_from_pmset() -> Option<Value> {
     #[cfg(target_os = "macos")]
     {
-        let output = Command::new("pmset").args(["-g", "batt"]).output().ok()?;
+        let output = run_command_with_timeout("pmset", &["-g", "batt"], SYSTEM_QUERY_TIMEOUT)?;
         if !output.status.success() {
             return None;
         }
@@ -177,10 +177,11 @@ fn battery_snapshot_from_pmset() -> Option<Value> {
 fn gpu_snapshot_from_ioreg() -> Option<Value> {
     #[cfg(target_os = "macos")]
     {
-        let output = Command::new("ioreg")
-            .args(["-r", "-d", "1", "-c", "IOAccelerator"])
-            .output()
-            .ok()?;
+        let output = run_command_with_timeout(
+            "ioreg",
+            &["-r", "-d", "1", "-c", "IOAccelerator"],
+            SYSTEM_QUERY_TIMEOUT,
+        )?;
         if !output.status.success() {
             return None;
         }
