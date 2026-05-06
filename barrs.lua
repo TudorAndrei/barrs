@@ -43,5 +43,12 @@ return {
 			handlers = { click = "open_clock" },
 			hover = { tooltip = "Current time" },
 		},
+		{
+			id = "date",
+			icon = "󰃭",
+			interval = 1800,
+			plugin = { kind = "date", format = "%Y-%m-%d" },
+			hover = { tooltip = "Current date" },
+		},
 	},
 }

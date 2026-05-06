@@ -461,6 +461,7 @@ fn item_refresh_interval(item: &ItemConfig, backend: RiftBackendKind) -> Option<
         .map(|interval| Duration::from_secs(interval.max(1)))
         .or(match item.plugin.as_ref().map(|plugin| plugin.kind) {
         Some(PluginKind::Time) => Some(Duration::from_secs(1)),
+        Some(PluginKind::Date) => Some(Duration::from_secs(30 * 60)),
         Some(PluginKind::Cpu | PluginKind::Gpu) => Some(Duration::from_secs(2)),
         Some(PluginKind::Battery) => Some(Duration::from_secs(10)),
         Some(PluginKind::RiftWorkspaces | PluginKind::RiftLayout) => {
@@ -790,6 +791,7 @@ return {{
             interval: None,
             plugin: Some(crate::config::PluginBinding {
                 kind: crate::config::PluginKind::RiftWorkspaces,
+                format: None,
             }),
             hover: None,
             handlers: crate::config::ItemHandlers::default(),
@@ -813,7 +815,7 @@ return {{
             icon: None,
             placement: None,
             interval: None,
-            plugin: Some(crate::config::PluginBinding { kind }),
+            plugin: Some(crate::config::PluginBinding { kind, format: None }),
             hover: None,
             handlers: crate::config::ItemHandlers::default(),
         };
@@ -845,6 +847,35 @@ return {{
                 crate::rift::RiftBackendKind::Mach
             ),
             Some(std::time::Duration::from_secs(10))
+        );
+        assert_eq!(
+            super::item_refresh_interval(
+                &make_item(crate::config::PluginKind::Date),
+                crate::rift::RiftBackendKind::Mach
+            ),
+            Some(std::time::Duration::from_secs(30 * 60))
+        );
+    }
+
+    #[test]
+    fn explicit_interval_overrides_date_default() {
+        let item = crate::config::ItemConfig {
+            id: "date".into(),
+            label: None,
+            icon: None,
+            placement: None,
+            interval: Some(7),
+            plugin: Some(crate::config::PluginBinding {
+                kind: crate::config::PluginKind::Date,
+                format: None,
+            }),
+            hover: None,
+            handlers: crate::config::ItemHandlers::default(),
+        };
+
+        assert_eq!(
+            super::item_refresh_interval(&item, crate::rift::RiftBackendKind::Mach),
+            Some(std::time::Duration::from_secs(7))
         );
     }
 }

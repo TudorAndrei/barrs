@@ -78,6 +78,8 @@ pub struct ItemConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginBinding {
     pub kind: PluginKind,
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -85,6 +87,7 @@ pub struct PluginBinding {
 pub enum PluginKind {
     Cpu,
     Time,
+    Date,
     Battery,
     Gpu,
     RiftWorkspaces,
@@ -148,6 +151,22 @@ pub fn validate_config(config: &Config) -> Result<(), BarrsError> {
         {
             return Err(BarrsError::InvalidConfig(format!(
                 "duplicate item id {}",
+                item.id
+            )));
+        }
+    }
+    for item in &config.items {
+        let Some(plugin) = &item.plugin else {
+            continue;
+        };
+        if plugin.kind == PluginKind::Date
+            && plugin
+                .format
+                .as_ref()
+                .is_some_and(|format| format.contains('\0'))
+        {
+            return Err(BarrsError::InvalidConfig(format!(
+                "date format for item {} must not contain NUL bytes",
                 item.id
             )));
         }
@@ -273,5 +292,79 @@ return {
 
         let config = load_config(&path).expect("empty bar config should load");
         assert!(config.bar.background.is_none());
+    }
+
+    #[test]
+    fn loads_date_plugin_with_format() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("barrs.lua");
+        fs::write(
+            &path,
+            r#"
+return {
+  items = {
+    {
+      id = "date",
+      plugin = { kind = "date", format = "%Y-%m-%d" }
+    }
+  }
+}
+"#,
+        )
+        .expect("write config");
+
+        let config = load_config(&path).expect("date config should load");
+        let plugin = config.items[0].plugin.as_ref().expect("plugin");
+        assert_eq!(plugin.kind, PluginKind::Date);
+        assert_eq!(plugin.format.as_deref(), Some("%Y-%m-%d"));
+    }
+
+    #[test]
+    fn loads_date_plugin_without_format() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("barrs.lua");
+        fs::write(
+            &path,
+            r#"
+return {
+  items = {
+    {
+      id = "date",
+      plugin = { kind = "date" }
+    }
+  }
+}
+"#,
+        )
+        .expect("write config");
+
+        let config = load_config(&path).expect("date config should load");
+        let plugin = config.items[0].plugin.as_ref().expect("plugin");
+        assert_eq!(plugin.kind, PluginKind::Date);
+        assert!(plugin.format.is_none());
+    }
+
+    #[test]
+    fn rejects_date_format_with_nul_byte() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("barrs.lua");
+        fs::write(
+            &path,
+            r#"
+return {
+  items = {
+    {
+      id = "date",
+      plugin = { kind = "date", format = "%Y\0%m" }
+    }
+  }
+}
+"#,
+        )
+        .expect("write config");
+
+        let error = load_config(&path).expect_err("NUL date format should fail");
+        assert!(error.to_string().contains("date format"));
+        assert!(error.to_string().contains("NUL"));
     }
 }

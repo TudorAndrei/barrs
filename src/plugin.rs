@@ -1,4 +1,4 @@
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -10,6 +10,8 @@ use crate::process::run_command_with_timeout;
 use crate::rift::{RiftSnapshot, RiftWorkspace};
 
 const SYSTEM_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+const DEFAULT_DATE_FORMAT: &str = "%Y-%m-%d";
+const TIME_FORMAT: &str = "%H:%M";
 
 pub trait Plugin: Send + Sync {
     fn snapshot(&self) -> Result<Value, BarrsError>;
@@ -19,9 +21,16 @@ pub trait Plugin: Send + Sync {
 }
 
 pub fn from_item_config(item: &ItemConfig, rift: Option<&RiftSnapshot>) -> Option<Box<dyn Plugin>> {
-    match item.plugin.as_ref()?.kind {
+    let binding = item.plugin.as_ref()?;
+    match binding.kind {
         PluginKind::Cpu => Some(Box::new(CpuPlugin)),
         PluginKind::Time => Some(Box::new(TimePlugin)),
+        PluginKind::Date => Some(Box::new(DatePlugin {
+            format: binding
+                .format
+                .clone()
+                .unwrap_or_else(|| DEFAULT_DATE_FORMAT.into()),
+        })),
         PluginKind::Battery => Some(Box::new(BatteryPlugin)),
         PluginKind::Gpu => Some(Box::new(GpuPlugin)),
         PluginKind::RiftWorkspaces => Some(Box::new(RiftWorkspacesPlugin {
@@ -53,10 +62,26 @@ pub struct TimePlugin;
 
 impl Plugin for TimePlugin {
     fn snapshot(&self) -> Result<Value, BarrsError> {
-        let formatted = format_local_time()?;
+        let formatted = format_local_time(TIME_FORMAT)?;
         Ok(json!({
             "text": formatted,
             "timezone": "local"
+        }))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DatePlugin {
+    pub format: String,
+}
+
+impl Plugin for DatePlugin {
+    fn snapshot(&self) -> Result<Value, BarrsError> {
+        let formatted = format_local_time(&self.format)?;
+        Ok(json!({
+            "text": formatted,
+            "timezone": "local",
+            "format": self.format,
         }))
     }
 }
@@ -128,14 +153,15 @@ fn parse_cpu_output(output: &str) -> Option<Value> {
     }))
 }
 
-fn format_local_time() -> Result<String, BarrsError> {
+fn format_local_time(format: &str) -> Result<String, BarrsError> {
     let mut timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|err| BarrsError::Unsupported(err.to_string()))?
         .as_secs() as libc::time_t;
     let mut local_time = std::mem::MaybeUninit::<libc::tm>::uninit();
-    let format = c"%H:%M";
-    let mut buffer = [0 as libc::c_char; 16];
+    let format =
+        CString::new(format).map_err(|_| BarrsError::Unsupported("format contains NUL".into()))?;
+    let mut buffer = [0 as libc::c_char; 256];
 
     // SAFETY: The pointers are valid for writes and remain alive for the duration of the calls.
     unsafe {
@@ -283,7 +309,10 @@ impl Plugin for RiftLayoutPlugin {
 #[cfg(test)]
 mod tests {
     use crate::config::{ItemConfig, ItemHandlers, PluginBinding, PluginKind};
-    use crate::plugin::{from_item_config, parse_battery_output, parse_cpu_output, parse_gpu_output};
+    use crate::plugin::{
+        DatePlugin, Plugin, from_item_config, parse_battery_output, parse_cpu_output,
+        parse_gpu_output,
+    };
     use crate::rift::{RiftSnapshot, RiftWorkspace};
 
     #[test]
@@ -296,6 +325,7 @@ mod tests {
             interval: Some(1),
             plugin: Some(PluginBinding {
                 kind: PluginKind::Cpu,
+                format: None,
             }),
             hover: None,
             handlers: ItemHandlers::default(),
@@ -316,6 +346,7 @@ mod tests {
             interval: Some(1),
             plugin: Some(PluginBinding {
                 kind: PluginKind::RiftWorkspaces,
+                format: None,
             }),
             hover: None,
             handlers: ItemHandlers::default(),
@@ -391,6 +422,7 @@ mod tests {
             interval: Some(1),
             plugin: Some(PluginBinding {
                 kind: PluginKind::Time,
+                format: None,
             }),
             hover: None,
             handlers: ItemHandlers::default(),
@@ -401,5 +433,53 @@ mod tests {
         let text = snapshot["text"].as_str().expect("time text");
         assert_eq!(text.len(), 5);
         assert_eq!(&text[2..3], ":");
+    }
+
+    #[test]
+    fn date_plugin_uses_default_format_from_config() {
+        let item = ItemConfig {
+            id: "date".into(),
+            label: None,
+            icon: None,
+            placement: None,
+            interval: None,
+            plugin: Some(PluginBinding {
+                kind: PluginKind::Date,
+                format: None,
+            }),
+            hover: None,
+            handlers: ItemHandlers::default(),
+        };
+
+        let plugin = from_item_config(&item, None).expect("plugin");
+        let snapshot = plugin.snapshot().expect("snapshot");
+        assert_eq!(snapshot["format"], "%Y-%m-%d");
+        assert!(!snapshot["text"].as_str().expect("date text").is_empty());
+    }
+
+    #[test]
+    fn date_plugin_formats_current_date() {
+        let plugin = DatePlugin {
+            format: "%Y-%m-%d".into(),
+        };
+
+        let snapshot = plugin.snapshot().expect("snapshot");
+        let text = snapshot["text"].as_str().expect("date text");
+        assert!(!text.is_empty());
+        assert_eq!(snapshot["timezone"], "local");
+        assert_eq!(snapshot["format"], "%Y-%m-%d");
+    }
+
+    #[test]
+    fn date_plugin_uses_known_format() {
+        let plugin = DatePlugin {
+            format: "%Y".into(),
+        };
+
+        let snapshot = plugin.snapshot().expect("snapshot");
+        let text = snapshot["text"].as_str().expect("date text");
+        assert_eq!(text.len(), 4);
+        assert!(text.chars().all(|ch| ch.is_ascii_digit()));
+        assert_eq!(snapshot["format"], "%Y");
     }
 }

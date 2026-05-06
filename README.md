@@ -8,7 +8,7 @@ It is built as a lightweight bar daemon with a Rust core, a native AppKit render
 
 - Native macOS renderer
 - Tight Rift workspace and layout integration
-- Built-in plugins for CPU, GPU, battery, and time
+- Built-in plugins for CPU, GPU, battery, time, and date
 - Hover tooltips and click handlers
 - Lua configuration
 - Homebrew installation and `launchd` service support
@@ -110,7 +110,7 @@ Configuration is written in Lua and currently covers:
 - hover tooltips
 - click and hover handlers
 
-Built-in `time`, `cpu`, `gpu`, and `battery` items now refresh automatically with sane defaults. Set `interval` on an item to override that default. Example:
+Built-in `time`, `date`, `cpu`, `gpu`, and `battery` items now refresh automatically with sane defaults. Set `interval` on an item to override that default. Example:
 
 ```lua
 {
@@ -121,7 +121,17 @@ Built-in `time`, `cpu`, `gpu`, and `battery` items now refresh automatically wit
 }
 ```
 
-The bundled default config also sets explicit intervals for `cpu`, `gpu`, `battery`, and `time`.
+The `date` plugin accepts a raw `strftime` format string. Omit `format` to use `%Y-%m-%d`:
+
+```lua
+{
+  id = "date",
+  icon = "󰃭",
+  plugin = { kind = "date", format = "%Y-%m-%d" },
+}
+```
+
+The bundled default config also sets explicit intervals for `cpu`, `gpu`, `battery`, `time`, and `date`.
 
 ## Built-in plugins
 
@@ -129,6 +139,7 @@ The bundled default config also sets explicit intervals for `cpu`, `gpu`, `batte
 - `gpu`
 - `battery`
 - `time`
+- `date`
 - `rift_workspaces`
 - `rift_layout`
 
