@@ -12,13 +12,13 @@ use crate::ipc::{EventKind, EventPayload};
 #[cfg(target_os = "macos")]
 use objc2::MainThreadOnly;
 #[cfg(target_os = "macos")]
-use objc2_foundation::{MainThreadMarker, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, NSString};
-#[cfg(target_os = "macos")]
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSEvent,
     NSEventMask, NSEventModifierFlags, NSEventType, NSFont, NSMainMenuWindowLevel, NSPanel,
     NSScreen, NSStatusWindowLevel, NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
+#[cfg(target_os = "macos")]
+use objc2_foundation::{MainThreadMarker, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, NSString};
 
 #[cfg(target_os = "macos")]
 #[link(name = "SkyLight", kind = "framework")]
@@ -30,13 +30,13 @@ unsafe extern "C" {
 #[cfg(target_os = "macos")]
 const BACKSTOP_MENU_LEVEL: i32 = -20;
 
-const ITEM_HORIZONTAL_PADDING: f64 = 12.0;
+const ITEM_HORIZONTAL_PADDING: f64 = 6.0;
 const CHARACTER_WIDTH: f64 = 9.5;
 const ICON_WIDTH: f64 = 18.0;
 const ICON_TEXT_SPACING: f64 = 6.0;
 const ITEM_LABEL_FONT_SIZE: f64 = 14.0;
 const ITEM_TEXT_HEIGHT: f64 = 18.0;
-const ITEM_TRAILING_TEXT_PADDING: f64 = 8.0;
+const ITEM_TRAILING_TEXT_PADDING: f64 = 0.0;
 const BAR_HEIGHT: f64 = 28.0;
 const DEFAULT_ITEM_SPACING: f64 = 6.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -536,7 +536,13 @@ impl AppKitHost {
         match event.r#type() {
             NSEventType::LeftMouseDown => {
                 if let Some(target) = target {
-                    vec![event_payload(target, EventKind::Click, event, Some("left".into()), None)]
+                    vec![event_payload(
+                        target,
+                        EventKind::Click,
+                        event,
+                        Some("left".into()),
+                        None,
+                    )]
                 } else {
                     self.dismiss_hover_panel();
                     Vec::new()
@@ -591,18 +597,33 @@ impl AppKitHost {
 
         match (self.pointer_item.clone(), next_item) {
             (Some(previous), Some(next)) if previous == next => {
-                vec![synthetic_event_payload(next, EventKind::HoverUpdate, location.x, location.y)]
+                vec![synthetic_event_payload(
+                    next,
+                    EventKind::HoverUpdate,
+                    location.x,
+                    location.y,
+                )]
             }
             (Some(previous), Some(next)) => {
                 self.pointer_item = Some(next.clone());
                 vec![
-                    synthetic_event_payload(previous, EventKind::HoverLeave, location.x, location.y),
+                    synthetic_event_payload(
+                        previous,
+                        EventKind::HoverLeave,
+                        location.x,
+                        location.y,
+                    ),
                     synthetic_event_payload(next, EventKind::HoverEnter, location.x, location.y),
                 ]
             }
             (None, Some(next)) => {
                 self.pointer_item = Some(next.clone());
-                vec![synthetic_event_payload(next, EventKind::HoverEnter, location.x, location.y)]
+                vec![synthetic_event_payload(
+                    next,
+                    EventKind::HoverEnter,
+                    location.x,
+                    location.y,
+                )]
             }
             (Some(previous), None) => {
                 self.pointer_item = None;
@@ -725,7 +746,11 @@ impl AppKitHost {
             label.setHidden(false);
         }
 
-        for label in entry.text_labels.iter().skip(mutation.layer.text_segments.len()) {
+        for label in entry
+            .text_labels
+            .iter()
+            .skip(mutation.layer.text_segments.len())
+        {
             label.setHidden(true);
         }
         Ok(())
@@ -891,10 +916,7 @@ fn parse_hex_color(hex: &str) -> Option<(f64, f64, f64, f64)> {
 }
 
 #[cfg(target_os = "macos")]
-fn create_content_view(
-    mtm: MainThreadMarker,
-    frame: &WindowFrame,
-) -> objc2::rc::Retained<NSView> {
+fn create_content_view(mtm: MainThreadMarker, frame: &WindowFrame) -> objc2::rc::Retained<NSView> {
     let view = NSView::initWithFrame(NSView::alloc(mtm), ns_rect(frame));
     view.setWantsLayer(true);
     view
@@ -1005,10 +1027,7 @@ fn layout_text_label(label: &NSTextField, text: &TextLayerPlan, frame: &ItemFram
     let height = fitted.size.height.max(ITEM_TEXT_HEIGHT);
     let y = ((frame.height - height) / 2.0).max(0.0);
     label.setFrame(NSRect {
-        origin: NSPoint {
-            x: text.x,
-            y,
-        },
+        origin: NSPoint { x: text.x, y },
         size: NSSize { width, height },
     });
 }
@@ -1195,15 +1214,49 @@ impl Renderer for NoopRenderer {
 
 fn measure_item_width(snapshot: &RenderItemSnapshot) -> f64 {
     let icon_width = if snapshot.icon.is_some() {
-        ICON_WIDTH
+        ICON_WIDTH + ICON_TEXT_SPACING
     } else {
         0.0
     };
-    let text_width = snapshot.text.chars().count() as f64 * CHARACTER_WIDTH;
+    let text_width = measure_snapshot_text_width(snapshot);
     ITEM_HORIZONTAL_PADDING * 2.0 + icon_width + text_width + ITEM_TRAILING_TEXT_PADDING
 }
 
-fn workspace_text_segments(snapshot: &RenderItemSnapshot, base_x: f64, center_y: f64) -> Option<Vec<TextLayerPlan>> {
+fn measure_snapshot_text_width(snapshot: &RenderItemSnapshot) -> f64 {
+    if let Some(width) = measure_workspace_text_width(snapshot) {
+        return width;
+    }
+    stable_text_char_count(&snapshot.text) as f64 * CHARACTER_WIDTH
+}
+
+fn stable_text_char_count(text: &str) -> usize {
+    if text
+        .strip_suffix('%')
+        .is_some_and(|value| value.parse::<u8>().is_ok_and(|percent| percent <= 100))
+    {
+        return "100%".chars().count();
+    }
+    text.chars().count()
+}
+
+fn measure_workspace_text_width(snapshot: &RenderItemSnapshot) -> Option<f64> {
+    let workspaces = snapshot.data.get("workspaces")?.as_array()?;
+    let mut width = 0.0;
+    for (index, workspace) in workspaces.iter().enumerate() {
+        let name = workspace.get("name").and_then(Value::as_str)?;
+        if index > 0 {
+            width += DEFAULT_ITEM_SPACING;
+        }
+        width += name.chars().count() as f64 * CHARACTER_WIDTH;
+    }
+    Some(width)
+}
+
+fn workspace_text_segments(
+    snapshot: &RenderItemSnapshot,
+    base_x: f64,
+    center_y: f64,
+) -> Option<Vec<TextLayerPlan>> {
     let workspaces = snapshot.data.get("workspaces")?.as_array()?;
     let mut cursor = base_x;
     let mut segments = Vec::with_capacity(workspaces.len());
@@ -1412,9 +1465,9 @@ mod tests {
     use crate::ipc::{EventKind, EventPayload, Modifiers, MouseState};
 
     use super::{
-        HostCommand, HostRuntimeState, HoverSurface, InteractiveSnapshot, LayerMutation,
-        MockNativeHost, NativeHost, NativeRenderer, NoopRenderer, RenderItemSnapshot, Renderer,
-        RendererKind, create_renderer, diff_host_scene, host_scene_plan, parse_hex_color,
+        create_renderer, diff_host_scene, host_scene_plan, parse_hex_color, HostCommand,
+        HostRuntimeState, HoverSurface, InteractiveSnapshot, LayerMutation, MockNativeHost,
+        NativeHost, NativeRenderer, NoopRenderer, RenderItemSnapshot, Renderer, RendererKind,
     };
 
     #[test]
@@ -1531,6 +1584,143 @@ mod tests {
         assert_eq!(state.items.len(), 1);
         assert_eq!(state.active_hover_item.as_deref(), Some("cpu"));
         assert!(state.items[0].frame.width > 0.0);
+    }
+
+    #[test]
+    fn percentage_width_is_stable_across_digit_changes() {
+        let narrow = RenderItemSnapshot {
+            id: "cpu".into(),
+            order: 0,
+            label: None,
+            icon: Some("cpu".into()),
+            placement: Some("left".into()),
+            text: "9%".into(),
+            hover: None,
+            interactive: InteractiveSnapshot {
+                click: false,
+                right_click: false,
+                scroll: false,
+                hover: false,
+            },
+            data: json!({ "text": "9%", "usage_percent": 9 }),
+        };
+        let mut wider = narrow.clone();
+        wider.text = "10%".into();
+        wider.data = json!({ "text": "10%", "usage_percent": 10 });
+
+        assert_eq!(
+            super::measure_item_width(&narrow),
+            super::measure_item_width(&wider)
+        );
+    }
+
+    #[test]
+    fn updating_percentage_item_does_not_shift_following_items() {
+        let mut renderer = NativeRenderer::new(Box::new(MockNativeHost::default()));
+        renderer
+            .initialize(&Config {
+                bar: crate::config::BarConfig {
+                    spacing: 0,
+                    background: None,
+                },
+                ..Config::default()
+            })
+            .expect("initialize");
+
+        let cpu = RenderItemSnapshot {
+            id: "cpu".into(),
+            order: 0,
+            label: None,
+            icon: Some("cpu".into()),
+            placement: Some("left".into()),
+            text: "9%".into(),
+            hover: None,
+            interactive: InteractiveSnapshot {
+                click: false,
+                right_click: false,
+                scroll: false,
+                hover: false,
+            },
+            data: json!({ "text": "9%", "usage_percent": 9 }),
+        };
+        let gpu = RenderItemSnapshot {
+            id: "gpu".into(),
+            order: 1,
+            label: None,
+            icon: Some("gpu".into()),
+            placement: Some("left".into()),
+            text: "27%".into(),
+            hover: None,
+            interactive: InteractiveSnapshot {
+                click: false,
+                right_click: false,
+                scroll: false,
+                hover: false,
+            },
+            data: json!({ "text": "27%", "utilization_percent": 27 }),
+        };
+
+        renderer.render_item(&cpu).expect("render cpu");
+        renderer.render_item(&gpu).expect("render gpu");
+        let gpu_x = renderer
+            .surface_state()
+            .items
+            .iter()
+            .find(|item| item.snapshot.id == "gpu")
+            .expect("gpu")
+            .frame
+            .x;
+
+        let mut updated_cpu = cpu;
+        updated_cpu.text = "10%".into();
+        updated_cpu.data = json!({ "text": "10%", "usage_percent": 10 });
+        renderer.render_item(&updated_cpu).expect("update cpu");
+
+        let updated_gpu_x = renderer
+            .surface_state()
+            .items
+            .iter()
+            .find(|item| item.snapshot.id == "gpu")
+            .expect("gpu")
+            .frame
+            .x;
+        assert_eq!(updated_gpu_x, gpu_x);
+    }
+
+    #[test]
+    fn workspace_width_matches_segment_layout() {
+        let snapshot = RenderItemSnapshot {
+            id: "workspaces".into(),
+            order: 0,
+            label: None,
+            icon: Some("spaces".into()),
+            placement: Some("left".into()),
+            text: "1 2 3".into(),
+            hover: None,
+            interactive: InteractiveSnapshot {
+                click: false,
+                right_click: false,
+                scroll: false,
+                hover: false,
+            },
+            data: json!({
+                "text": "1 2 3",
+                "workspaces": [
+                    { "name": "1", "is_current": true, "has_windows": true },
+                    { "name": "2", "is_current": false, "has_windows": true },
+                    { "name": "3", "is_current": false, "has_windows": false }
+                ]
+            }),
+        };
+
+        let width = super::measure_item_width(&snapshot);
+        let expected = (super::ITEM_HORIZONTAL_PADDING * 2.0)
+            + super::ICON_WIDTH
+            + super::ICON_TEXT_SPACING
+            + (3.0 * super::CHARACTER_WIDTH)
+            + (2.0 * super::DEFAULT_ITEM_SPACING);
+
+        assert_eq!(width, expected);
     }
 
     #[test]
