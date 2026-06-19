@@ -1,0 +1,12 @@
+[tools]
+rust = "latest"
+cocogitto = "7.0.0"
+"cargo:cargo-release" = "1.1.2"
+
+[tasks.release-plan]
+description = "Show the next release version from conventional commits"
+run = "cog bump --dry-run --auto"
+
+[tasks.release-auto]
+description = "Cut a release from conventional commits"
+run = "bash scripts/release-auto.sh"

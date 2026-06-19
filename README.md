@@ -182,24 +182,24 @@ barrs item trigger <item-id> <event>
 
 ## Releases
 
-Releases should be created with `cargo-release` so the crate version, git tag, and published binary version stay in sync.
+Releases are automated from conventional commits on `main`. When a qualifying commit is pushed, GitHub Actions uses Cocogitto to calculate the next SemVer version, updates [CHANGELOG.md](./CHANGELOG.md), and uses `cargo-release` to create the release commit and matching `v{{version}}` tag.
 
-Install it once:
+Install the local release tooling with `mise`:
 
 ```bash
-cargo install cargo-release
+mise install
 ```
 
-Dry run the next patch release:
+Preview the next automatic version:
 
 ```bash
-cargo release patch
+mise run release-plan
 ```
 
-Execute the release:
+Cut the release locally:
 
 ```bash
-cargo release patch --execute
+mise run release-auto
 ```
 
 This repository uses [release.toml](./release.toml) to:
@@ -210,6 +210,8 @@ This repository uses [release.toml](./release.toml) to:
 - skip `cargo publish`, since GitHub Actions handles packaging and the Homebrew formula update
 
 After the tag is pushed, GitHub Actions builds the macOS archives, publishes the GitHub release assets, and updates `Formula/barrs.rb`.
+
+For manual releases, keep using `cargo-release`; do not hand-edit `Cargo.toml` and manually tag.
 
 ## Notes
 
