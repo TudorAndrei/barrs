@@ -42,7 +42,13 @@ Documentation updates should explain `placement = "left"`, `placement = "middle"
 - Ensure `configure_window`, content view sizing, hover panel anchoring, and event hit-testing remain in the same window coordinate space after the window becomes full-width.
 **Commit:** `feat(macos): avoid notch area in native bar layout`
 
-### Phase 4: Docs, Sample Config, and Verification
+### Phase 4: Lua-Compatible Trigger Payloads
+- Change `EventPayload::timestamp_ms` in `src/ipc.rs` from `u128` to `u64` so triggered events can be converted into Lua handler context values by `mlua`.
+- Reuse the same timestamp helper from AppKit native event payload builders in `src/render.rs`.
+- Verify `barrs item trigger <item-id> click` and `hover-enter` no longer make the daemon unavailable during the native smoke test.
+**Commit:** `fix(ipc): make trigger payloads Lua-compatible`
+
+### Phase 5: Docs, Sample Config, and Verification
 - Update `README.md` configuration docs to describe the three sections, accepted placement strings, default behavior, `bar.notch_width`, `bar.notch_offset`, `bar.notch_display_height`, and notch-aware middle behavior.
 - Update `barrs.lua` to demonstrate `left`, `middle`, and `right` placements with the existing Rift/workspace and system plugin items.
 - Run formatting and tests with `cargo fmt`, `cargo test`, and `cargo run -- --version`, then manually smoke test on macOS with `cargo run -- start --config barrs.lua`.

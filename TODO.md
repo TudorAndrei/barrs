@@ -22,9 +22,15 @@
 - [x] Implement built-in-display notch-height detection modeled on SketchyBar's `CGDisplayIsBuiltin` plus `NSScreen.safeAreaInsets.top` approach when available through current AppKit bindings.
 - [x] Apply `bar.notch_offset` and `bar.notch_display_height` to built-in-display top bar frame calculations.
 - [x] Verify `configure_window`, content view sizing, hover panel anchoring, and item hit-testing still use consistent window coordinates.
-- [ ] Commit: `feat(macos): avoid notch area in native bar layout`
+- [x] Commit: `feat(macos): avoid notch area in native bar layout`
 
-## Phase 4: Docs, Sample Config, and Verification
+## Phase 4: Lua-Compatible Trigger Payloads
+- [x] Change `src/ipc.rs::EventPayload::timestamp_ms` from `u128` to `u64` so Lua handler context conversion supports triggered events.
+- [x] Reuse the IPC timestamp helper from AppKit native and synthetic event payload builders in `src/render.rs`.
+- [x] Verify `barrs item trigger time click` and `barrs item trigger time hover-enter` no longer make the daemon unavailable during native smoke testing.
+- [ ] Commit: `fix(ipc): make trigger payloads Lua-compatible`
+
+## Phase 5: Docs, Sample Config, and Verification
 - [ ] Update `README.md` to document `placement = "left"`, `"middle"`/`"center"`, and `"right"` plus `bar.notch_width`, `bar.notch_offset`, `bar.notch_display_height`, and notch-aware middle behavior.
 - [ ] Update `barrs.lua` to demonstrate existing items distributed across left, middle, and right sections.
 - [ ] Run `cargo fmt`.

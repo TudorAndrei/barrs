@@ -19,7 +19,7 @@ pub fn default_socket_path() -> PathBuf {
 pub struct EventPayload {
     pub item_id: String,
     pub event: EventKind,
-    pub timestamp_ms: u128,
+    pub timestamp_ms: u64,
     pub mouse: MouseState,
     pub modifiers: Modifiers,
 }
@@ -29,14 +29,20 @@ impl EventPayload {
         Self {
             item_id,
             event: EventKind::from(event),
-            timestamp_ms: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis(),
+            timestamp_ms: current_timestamp_ms(),
             mouse: MouseState::default(),
             modifiers: Modifiers::default(),
         }
     }
+}
+
+pub fn current_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

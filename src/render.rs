@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
@@ -7,7 +6,7 @@ use serde_json::Value;
 
 use crate::config::{BarSection, Config, HoverConfig, ItemConfig};
 use crate::error::BarrsError;
-use crate::ipc::{EventKind, EventPayload};
+use crate::ipc::{EventKind, EventPayload, current_timestamp_ms};
 
 #[cfg(target_os = "macos")]
 use objc2::MainThreadOnly;
@@ -1751,10 +1750,7 @@ fn event_payload(
     EventPayload {
         item_id,
         event,
-        timestamp_ms: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis(),
+        timestamp_ms: current_timestamp_ms(),
         mouse: crate::ipc::MouseState {
             x: location.x.round() as i32,
             y: location.y.round() as i32,
@@ -1775,10 +1771,7 @@ fn synthetic_event_payload(item_id: String, event: EventKind, x: f64, y: f64) ->
     EventPayload {
         item_id,
         event,
-        timestamp_ms: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis(),
+        timestamp_ms: current_timestamp_ms(),
         mouse: crate::ipc::MouseState {
             x: x.round() as i32,
             y: y.round() as i32,
@@ -1797,9 +1790,9 @@ mod tests {
     use crate::ipc::{EventKind, EventPayload, Modifiers, MouseState};
 
     use super::{
-        create_renderer, diff_host_scene, host_scene_plan, parse_hex_color, HostCommand,
-        HostRuntimeState, HoverSurface, InteractiveSnapshot, LayerMutation, MockNativeHost,
-        NativeHost, NativeRenderer, NoopRenderer, RenderItemSnapshot, Renderer, RendererKind,
+        HostCommand, HostRuntimeState, HoverSurface, InteractiveSnapshot, LayerMutation,
+        MockNativeHost, NativeHost, NativeRenderer, NoopRenderer, RenderItemSnapshot, Renderer,
+        RendererKind, create_renderer, diff_host_scene, host_scene_plan, parse_hex_color,
     };
 
     fn test_snapshot(
