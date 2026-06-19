@@ -253,7 +253,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{BarConfig, BarSection, PluginKind, load_config};
+    use super::{load_config, BarConfig, BarSection, PluginKind};
 
     #[test]
     fn loads_lua_config() {

@@ -6,14 +6,14 @@
 - [x] Extend `src/config.rs::BarConfig` with `notch_width`, `notch_offset`, and `notch_display_height` fields using SketchyBar-inspired defaults.
 - [x] Replace `src/render.rs::placement_rank` sorting with section-aware parsing while preserving `RenderItemSnapshot::order` inside each section.
 - [x] Add tests in `src/config.rs` and `src/render.rs` for valid placements, `middle` aliasing, invalid placement rejection, notch config defaults, and stable per-section ordering.
-- [ ] Commit: `feat(config): model bar sections and notch settings`
+- [x] Commit: `feat(config): model bar sections and notch settings`
 
 ## Phase 2: Section-Aware Layout Geometry
-- [ ] Add a renderer layout geometry type in `src/render.rs` with full bar width, safe insets, spacing, and optional center reserved range derived from `notch_width`.
-- [ ] Update `NativeSurfaceState::relayout` to independently position left, center/middle, and right sections.
-- [ ] Split middle/center items around the reserved notch gap when a built-in-display notch range is active, modeled on SketchyBar's `center_left`/`center_right` streams.
-- [ ] Update `BarScene`, `HostScenePlan`, and `host_scene_plan` so the planned window uses full layout width rather than content width.
-- [ ] Extend `MockNativeHost`/renderer tests for safe left start, right alignment, centered middle placement without a notch, and reserved-gap avoidance with a notch.
+- [x] Add a renderer layout geometry type in `src/render.rs` with full bar width, safe insets, spacing, and optional center reserved range derived from `notch_width`.
+- [x] Update `NativeSurfaceState::relayout` to independently position left, center/middle, and right sections.
+- [x] Split middle/center items around the reserved notch gap when a built-in-display notch range is active, modeled on SketchyBar's `center_left`/`center_right` streams.
+- [x] Update `BarScene`, `HostScenePlan`, and `host_scene_plan` so the planned window uses full layout width rather than content width.
+- [x] Extend `MockNativeHost`/renderer tests for safe left start, right alignment, centered middle placement without a notch, and reserved-gap avoidance with a notch.
 - [ ] Commit: `feat(render): lay out independent bar sections`
 
 ## Phase 3: macOS Notch-Aware Host Metrics

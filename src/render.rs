@@ -177,8 +177,57 @@ pub struct HoverPresentation {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BarScene {
     pub bar_height: f64,
+    pub bar_width: f64,
     pub items: Vec<PositionedItemSnapshot>,
     pub hover: Option<HoverPresentation>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct CenterReservedRange {
+    pub start: f64,
+    pub end: f64,
+}
+
+impl CenterReservedRange {
+    fn normalized(self, bar_width: f64) -> Option<Self> {
+        let start = self.start.max(0.0).min(bar_width);
+        let end = self.end.max(start).min(bar_width);
+        if end > start {
+            Some(Self { start, end })
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct LayoutGeometry {
+    pub bar_width: f64,
+    pub safe_left: f64,
+    pub safe_right: f64,
+    pub center_reserved: Option<CenterReservedRange>,
+}
+
+impl Default for LayoutGeometry {
+    fn default() -> Self {
+        Self {
+            bar_width: 0.0,
+            safe_left: 0.0,
+            safe_right: 0.0,
+            center_reserved: None,
+        }
+    }
+}
+
+impl LayoutGeometry {
+    fn usable_width(self) -> f64 {
+        (self.bar_width - self.safe_left - self.safe_right).max(0.0)
+    }
+
+    fn normalized_reserved(self) -> Option<CenterReservedRange> {
+        self.center_reserved
+            .and_then(|range| range.normalized(self.bar_width))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -281,6 +330,7 @@ impl HostRuntimeState {
 pub struct NativeSurfaceState {
     pub bar_height: f64,
     pub item_spacing: f64,
+    pub layout: LayoutGeometry,
     pub active_hover_item: Option<String>,
     pub items: Vec<PositionedItemSnapshot>,
 }
@@ -290,6 +340,7 @@ impl Default for NativeSurfaceState {
         Self {
             bar_height: 0.0,
             item_spacing: DEFAULT_ITEM_SPACING,
+            layout: LayoutGeometry::default(),
             active_hover_item: None,
             items: Vec::new(),
         }
@@ -316,16 +367,126 @@ impl NativeSurfaceState {
         self.relayout();
     }
 
+    pub fn set_layout_geometry(&mut self, layout: LayoutGeometry) {
+        self.layout = layout;
+        self.relayout();
+    }
+
     fn relayout(&mut self) {
+        if self.layout.bar_width <= 0.0 {
+            self.relayout_content_width();
+            return;
+        }
+
+        let left = item_indices_for_section(&self.items, BarSection::Left);
+        let middle = item_indices_for_section(&self.items, BarSection::Middle);
+        let right = item_indices_for_section(&self.items, BarSection::Right);
+
+        self.layout_left_items(&left);
+        self.layout_right_items(&right);
+        self.layout_middle_items(&middle);
+    }
+
+    fn relayout_content_width(&mut self) {
         let mut cursor = self.item_spacing;
-        for item in &mut self.items {
-            let width = measure_item_width(&item.snapshot);
-            item.frame = ItemFrame {
+        for index in 0..self.items.len() {
+            let width = measure_item_width(&self.items[index].snapshot);
+            self.items[index].frame = ItemFrame {
                 x: cursor,
                 width,
                 height: self.bar_height,
             };
             cursor += width + self.item_spacing;
+        }
+    }
+
+    fn layout_left_items(&mut self, indices: &[usize]) {
+        let mut cursor = self.layout.safe_left + self.item_spacing;
+        for &index in indices {
+            let width = measure_item_width(&self.items[index].snapshot);
+            self.items[index].frame = ItemFrame {
+                x: cursor,
+                width,
+                height: self.bar_height,
+            };
+            cursor += width + self.item_spacing;
+        }
+    }
+
+    fn layout_right_items(&mut self, indices: &[usize]) {
+        let mut cursor = (self.layout.bar_width - self.layout.safe_right - self.item_spacing)
+            .max(self.layout.safe_left);
+        for &index in indices {
+            let width = measure_item_width(&self.items[index].snapshot);
+            cursor = (cursor - width).max(self.layout.safe_left);
+            self.items[index].frame = ItemFrame {
+                x: cursor,
+                width,
+                height: self.bar_height,
+            };
+            cursor = (cursor - self.item_spacing).max(self.layout.safe_left);
+        }
+    }
+
+    fn layout_middle_items(&mut self, indices: &[usize]) {
+        if indices.is_empty() {
+            return;
+        }
+
+        if let Some(reserved) = self.layout.normalized_reserved() {
+            self.layout_middle_items_around_reserved(indices, reserved);
+            return;
+        }
+
+        let total_width = section_total_width(&self.items, indices, self.item_spacing);
+        let usable_start = self.layout.safe_left;
+        let usable_width = self.layout.usable_width();
+        let mut cursor = usable_start + ((usable_width - total_width) / 2.0).max(0.0);
+        for &index in indices {
+            let width = measure_item_width(&self.items[index].snapshot);
+            self.items[index].frame = ItemFrame {
+                x: cursor,
+                width,
+                height: self.bar_height,
+            };
+            cursor += width + self.item_spacing;
+        }
+    }
+
+    fn layout_middle_items_around_reserved(
+        &mut self,
+        indices: &[usize],
+        reserved: CenterReservedRange,
+    ) {
+        let (left_indices, right_indices) =
+            split_middle_indices(&self.items, indices, self.item_spacing);
+        let mut left_cursor = (reserved.start - self.item_spacing).min(self.layout.bar_width);
+        for index in left_indices {
+            let width = measure_item_width(&self.items[index].snapshot);
+            left_cursor = (left_cursor - width).max(self.layout.safe_left);
+            self.items[index].frame = ItemFrame {
+                x: left_cursor,
+                width,
+                height: self.bar_height,
+            };
+            left_cursor = (left_cursor - self.item_spacing).max(self.layout.safe_left);
+        }
+
+        let mut right_cursor = (reserved.end + self.item_spacing)
+            .max(self.layout.safe_left)
+            .min(self.layout.bar_width - self.layout.safe_right);
+        for index in right_indices {
+            let width = measure_item_width(&self.items[index].snapshot);
+            let max_x =
+                (self.layout.bar_width - self.layout.safe_right - width).max(self.layout.safe_left);
+            let x = right_cursor.min(max_x);
+            self.items[index].frame = ItemFrame {
+                x,
+                width,
+                height: self.bar_height,
+            };
+            right_cursor =
+                (x + width + self.item_spacing).min(self.layout.bar_width - self.layout.safe_right);
         }
     }
 
@@ -368,6 +529,11 @@ impl NativeSurfaceState {
 
         BarScene {
             bar_height: self.bar_height,
+            bar_width: if self.layout.bar_width > 0.0 {
+                self.layout.bar_width
+            } else {
+                content_width(&self.items, self.item_spacing)
+            },
             items: self.items.clone(),
             hover,
         }
@@ -1222,6 +1388,62 @@ fn measure_item_width(snapshot: &RenderItemSnapshot) -> f64 {
     ITEM_HORIZONTAL_PADDING * 2.0 + icon_width + text_width + ITEM_TRAILING_TEXT_PADDING
 }
 
+fn item_indices_for_section(items: &[PositionedItemSnapshot], section: BarSection) -> Vec<usize> {
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            if BarSection::from_placement(item.snapshot.placement.as_deref())
+                .unwrap_or(BarSection::Left)
+                == section
+            {
+                Some(index)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn section_total_width(items: &[PositionedItemSnapshot], indices: &[usize], spacing: f64) -> f64 {
+    let widths = indices
+        .iter()
+        .map(|index| measure_item_width(&items[*index].snapshot))
+        .sum::<f64>();
+    widths + spacing * indices.len().saturating_sub(1) as f64
+}
+
+fn content_width(items: &[PositionedItemSnapshot], spacing: f64) -> f64 {
+    items
+        .iter()
+        .map(|item| item.frame.x + item.frame.width + spacing)
+        .fold(0.0, f64::max)
+}
+
+fn split_middle_indices(
+    items: &[PositionedItemSnapshot],
+    indices: &[usize],
+    spacing: f64,
+) -> (Vec<usize>, Vec<usize>) {
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    let mut left_width = 0.0;
+    let mut right_width = 0.0;
+
+    for &index in indices {
+        let width = measure_item_width(&items[index].snapshot);
+        if left_width <= right_width {
+            left.push(index);
+            left_width += width + spacing;
+        } else {
+            right.push(index);
+            right_width += width + spacing;
+        }
+    }
+
+    (left, right)
+}
+
 fn measure_snapshot_text_width(snapshot: &RenderItemSnapshot) -> f64 {
     if let Some(width) = measure_workspace_text_width(snapshot) {
         return width;
@@ -1288,7 +1510,7 @@ fn workspace_text_segments(
 }
 
 fn host_scene_plan(scene: &BarScene) -> HostScenePlan {
-    let width = scene
+    let content_width = scene
         .items
         .last()
         .map(|item| item.frame.x + item.frame.width + scene.items[0].frame.x)
@@ -1341,7 +1563,7 @@ fn host_scene_plan(scene: &BarScene) -> HostScenePlan {
         window: WindowFrame {
             x: 0.0,
             y: 0.0,
-            width,
+            width: scene.bar_width.max(content_width),
             height: scene.bar_height,
         },
         item_layers,
@@ -1462,10 +1684,41 @@ mod tests {
     use crate::ipc::{EventKind, EventPayload, Modifiers, MouseState};
 
     use super::{
-        HostCommand, HostRuntimeState, HoverSurface, InteractiveSnapshot, LayerMutation,
-        MockNativeHost, NativeHost, NativeRenderer, NoopRenderer, RenderItemSnapshot, Renderer,
-        RendererKind, create_renderer, diff_host_scene, host_scene_plan, parse_hex_color,
+        create_renderer, diff_host_scene, host_scene_plan, parse_hex_color, HostCommand,
+        HostRuntimeState, HoverSurface, InteractiveSnapshot, LayerMutation, MockNativeHost,
+        NativeHost, NativeRenderer, NoopRenderer, RenderItemSnapshot, Renderer, RendererKind,
     };
+
+    fn test_snapshot(
+        id: &str,
+        order: usize,
+        placement: Option<&str>,
+        text: &str,
+    ) -> RenderItemSnapshot {
+        RenderItemSnapshot {
+            id: id.into(),
+            order,
+            label: None,
+            icon: None,
+            placement: placement.map(str::to_owned),
+            text: text.into(),
+            hover: None,
+            interactive: InteractiveSnapshot {
+                click: false,
+                right_click: false,
+                scroll: false,
+                hover: false,
+            },
+            data: json!({ "text": text }),
+        }
+    }
+
+    fn assert_close(left: f64, right: f64) {
+        assert!(
+            (left - right).abs() < 0.001,
+            "expected {left} to be close to {right}"
+        );
+    }
 
     #[test]
     fn builds_render_snapshot_from_item_config() {
@@ -1706,6 +1959,112 @@ mod tests {
     }
 
     #[test]
+    fn layout_positions_left_middle_and_right_sections_independently() {
+        let mut renderer = NativeRenderer::new(Box::new(MockNativeHost::default()));
+        renderer
+            .initialize(&Config {
+                bar: crate::config::BarConfig {
+                    spacing: 4,
+                    ..crate::config::BarConfig::default()
+                },
+                ..Config::default()
+            })
+            .expect("initialize");
+        renderer.state.set_layout_geometry(super::LayoutGeometry {
+            bar_width: 300.0,
+            safe_left: 10.0,
+            safe_right: 20.0,
+            center_reserved: None,
+        });
+
+        renderer
+            .render_item(&test_snapshot("left", 0, Some("left"), "L"))
+            .expect("render left");
+        renderer
+            .render_item(&test_snapshot("middle", 1, Some("middle"), "M"))
+            .expect("render middle");
+        renderer
+            .render_item(&test_snapshot("right", 2, Some("right"), "R"))
+            .expect("render right");
+
+        let item = |id: &str| {
+            renderer
+                .surface_state()
+                .items
+                .iter()
+                .find(|item| item.snapshot.id == id)
+                .expect("item")
+                .frame
+                .clone()
+        };
+        let left = item("left");
+        let middle = item("middle");
+        let right = item("right");
+
+        assert_close(left.x, 14.0);
+        assert_close(middle.x + (middle.width / 2.0), 145.0);
+        assert_close(right.x + right.width, 276.0);
+    }
+
+    #[test]
+    fn layout_splits_middle_items_around_reserved_center_gap() {
+        let mut renderer = NativeRenderer::new(Box::new(MockNativeHost::default()));
+        renderer
+            .initialize(&Config {
+                bar: crate::config::BarConfig {
+                    spacing: 4,
+                    ..crate::config::BarConfig::default()
+                },
+                ..Config::default()
+            })
+            .expect("initialize");
+        renderer.state.set_layout_geometry(super::LayoutGeometry {
+            bar_width: 300.0,
+            safe_left: 0.0,
+            safe_right: 0.0,
+            center_reserved: Some(super::CenterReservedRange {
+                start: 125.0,
+                end: 175.0,
+            }),
+        });
+
+        renderer
+            .render_item(&test_snapshot("middle-left", 0, Some("middle"), "L"))
+            .expect("render middle left");
+        renderer
+            .render_item(&test_snapshot("middle-right", 1, Some("middle"), "R"))
+            .expect("render middle right");
+
+        for item in &renderer.surface_state().items {
+            let frame = &item.frame;
+            assert!(
+                frame.x + frame.width <= 125.0 || frame.x >= 175.0,
+                "{} overlaps the reserved center gap: {:?}",
+                item.snapshot.id,
+                frame
+            );
+        }
+    }
+
+    #[test]
+    fn host_scene_plan_uses_full_layout_width() {
+        let mut renderer = NativeRenderer::new(Box::new(MockNativeHost::default()));
+        renderer.initialize(&Config::default()).expect("initialize");
+        renderer.state.set_layout_geometry(super::LayoutGeometry {
+            bar_width: 320.0,
+            safe_left: 0.0,
+            safe_right: 0.0,
+            center_reserved: None,
+        });
+        renderer
+            .render_item(&test_snapshot("left", 0, Some("left"), "L"))
+            .expect("render left");
+
+        let plan = host_scene_plan(&renderer.state.scene());
+        assert_eq!(plan.window.width, 320.0);
+    }
+
+    #[test]
     fn updating_percentage_item_does_not_shift_following_items() {
         let mut renderer = NativeRenderer::new(Box::new(MockNativeHost::default()));
         renderer
@@ -1884,6 +2243,7 @@ mod tests {
         let mut host = MockNativeHost::default();
         let scene = super::BarScene {
             bar_height: 28.0,
+            bar_width: 100.0,
             items: Vec::new(),
             hover: None,
         };
@@ -1900,6 +2260,7 @@ mod tests {
     fn host_scene_plan_builds_hover_panel_and_layers() {
         let scene = super::BarScene {
             bar_height: 28.0,
+            bar_width: 100.0,
             items: vec![super::PositionedItemSnapshot {
                 snapshot: RenderItemSnapshot {
                     id: "cpu".into(),
