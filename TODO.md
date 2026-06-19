@@ -14,14 +14,14 @@
 - [x] Split middle/center items around the reserved notch gap when a built-in-display notch range is active, modeled on SketchyBar's `center_left`/`center_right` streams.
 - [x] Update `BarScene`, `HostScenePlan`, and `host_scene_plan` so the planned window uses full layout width rather than content width.
 - [x] Extend `MockNativeHost`/renderer tests for safe left start, right alignment, centered middle placement without a notch, and reserved-gap avoidance with a notch.
-- [ ] Commit: `feat(render): lay out independent bar sections`
+- [x] Commit: `feat(render): lay out independent bar sections`
 
 ## Phase 3: macOS Notch-Aware Host Metrics
-- [ ] Extend `NativeHost` in `src/render.rs` so the renderer can obtain current layout metrics from the host.
-- [ ] Update `AppKitHost` to derive top bar width and y-position from `NSScreen::frame()` and `NSScreen::visibleFrame()`.
-- [ ] Implement built-in-display notch-height detection modeled on SketchyBar's `CGDisplayIsBuiltin` plus `NSScreen.safeAreaInsets.top` approach when available through current AppKit bindings.
-- [ ] Apply `bar.notch_offset` and `bar.notch_display_height` to built-in-display top bar frame calculations.
-- [ ] Verify `configure_window`, content view sizing, hover panel anchoring, and item hit-testing still use consistent window coordinates.
+- [x] Extend `NativeHost` in `src/render.rs` so the renderer can obtain current layout metrics from the host.
+- [x] Update `AppKitHost` to derive top bar width and y-position from `NSScreen::frame()` and `NSScreen::visibleFrame()`.
+- [x] Implement built-in-display notch-height detection modeled on SketchyBar's `CGDisplayIsBuiltin` plus `NSScreen.safeAreaInsets.top` approach when available through current AppKit bindings.
+- [x] Apply `bar.notch_offset` and `bar.notch_display_height` to built-in-display top bar frame calculations.
+- [x] Verify `configure_window`, content view sizing, hover panel anchoring, and item hit-testing still use consistent window coordinates.
 - [ ] Commit: `feat(macos): avoid notch area in native bar layout`
 
 ## Phase 4: Docs, Sample Config, and Verification

@@ -18,6 +18,8 @@ use objc2_app_kit::{
     NSScreen, NSStatusWindowLevel, NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
 #[cfg(target_os = "macos")]
+use objc2_core_graphics::CGDisplayIsBuiltin;
+#[cfg(target_os = "macos")]
 use objc2_foundation::{MainThreadMarker, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, NSString};
 
 #[cfg(target_os = "macos")]
@@ -542,6 +544,13 @@ impl NativeSurfaceState {
 
 trait NativeHost: Send + Sync {
     fn initialize(&mut self, config: &Config) -> Result<(), BarrsError>;
+    fn layout_geometry(
+        &self,
+        _config: &Config,
+        _bar_height: f64,
+    ) -> Result<LayoutGeometry, BarrsError> {
+        Ok(LayoutGeometry::default())
+    }
     fn present(&mut self, scene: &BarScene) -> Result<(), BarrsError>;
     fn drain_events(&mut self) -> Result<Vec<EventPayload>, BarrsError> {
         Ok(Vec::new())
@@ -610,6 +619,9 @@ struct AppKitHost {
     pending_events: Vec<EventPayload>,
     pointer_item: Option<String>,
     background: Option<String>,
+    builtin_display: bool,
+    notch_offset: u32,
+    notch_display_height: u32,
 }
 
 #[cfg(target_os = "macos")]
@@ -629,6 +641,9 @@ impl Default for AppKitHost {
             pending_events: Vec::new(),
             pointer_item: None,
             background: None,
+            builtin_display: false,
+            notch_offset: 0,
+            notch_display_height: 0,
         }
     }
 }
@@ -646,8 +661,28 @@ impl NativeHost for AppKitHost {
         let app = NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
         self.background = config.bar.background.clone();
+        self.builtin_display = main_screen_is_builtin(mtm);
+        self.notch_offset = if self.builtin_display {
+            config.bar.notch_offset
+        } else {
+            0
+        };
+        self.notch_display_height = if self.builtin_display {
+            config.bar.notch_display_height
+        } else {
+            0
+        };
         self.app = Some(app);
         Ok(())
+    }
+
+    fn layout_geometry(
+        &self,
+        config: &Config,
+        _bar_height: f64,
+    ) -> Result<LayoutGeometry, BarrsError> {
+        let mtm = main_thread_marker()?;
+        Ok(main_screen_layout_geometry(config, mtm))
     }
 
     fn present(&mut self, scene: &BarScene) -> Result<(), BarrsError> {
@@ -846,10 +881,22 @@ impl AppKitHost {
 
     fn configure_window(&mut self, frame: &WindowFrame) -> Result<(), BarrsError> {
         let mtm = main_thread_marker()?;
-        let anchored = anchor_bar_frame(frame, mtm);
+        let anchored = anchor_bar_frame(
+            frame,
+            mtm,
+            self.builtin_display,
+            self.notch_offset,
+            self.notch_display_height,
+        );
+        let content_frame = WindowFrame {
+            x: 0.0,
+            y: 0.0,
+            width: anchored.width,
+            height: anchored.height,
+        };
         if self.window.is_none() || self.content_view.is_none() {
             let window = create_bar_window(mtm, &anchored, self.background.as_deref())?;
-            let content_view = create_content_view(mtm, frame);
+            let content_view = create_content_view(mtm, &content_frame);
             window.setContentView(Some(&content_view));
             window.orderFrontRegardless();
             self.content_view = Some(content_view);
@@ -863,7 +910,7 @@ impl AppKitHost {
             apply_backstop_level(window);
         }
         if let Some(content_view) = &self.content_view {
-            content_view.setFrame(ns_rect(frame));
+            content_view.setFrame(ns_rect(&content_frame));
         }
         Ok(())
     }
@@ -1259,7 +1306,61 @@ fn hover_panel_frame_at(anchor_x: f64, anchor_y: f64, text: &str) -> WindowFrame
 }
 
 #[cfg(target_os = "macos")]
-fn anchor_bar_frame(frame: &WindowFrame, mtm: MainThreadMarker) -> WindowFrame {
+fn main_screen_is_builtin(mtm: MainThreadMarker) -> bool {
+    NSScreen::mainScreen(mtm)
+        .map(|screen| CGDisplayIsBuiltin(screen.CGDirectDisplayID()))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn main_screen_layout_geometry(config: &Config, mtm: MainThreadMarker) -> LayoutGeometry {
+    let Some(screen) = NSScreen::mainScreen(mtm) else {
+        return LayoutGeometry::default();
+    };
+    let full = screen.frame();
+    let display_id = screen.CGDirectDisplayID();
+    let builtin = CGDisplayIsBuiltin(display_id);
+    let notch_height = if builtin {
+        screen.safeAreaInsets().top.max(0.0)
+    } else {
+        0.0
+    };
+    LayoutGeometry {
+        bar_width: full.size.width,
+        safe_left: 0.0,
+        safe_right: 0.0,
+        center_reserved: center_reserved_range(
+            full.size.width,
+            config.bar.notch_width,
+            builtin && notch_height > 0.0,
+        ),
+    }
+}
+
+fn center_reserved_range(
+    bar_width: f64,
+    notch_width: u32,
+    notch_active: bool,
+) -> Option<CenterReservedRange> {
+    if !notch_active || bar_width <= 0.0 || notch_width == 0 {
+        return None;
+    }
+    let width = (notch_width as f64).min(bar_width);
+    let center = bar_width / 2.0;
+    Some(CenterReservedRange {
+        start: center - (width / 2.0),
+        end: center + (width / 2.0),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn anchor_bar_frame(
+    frame: &WindowFrame,
+    mtm: MainThreadMarker,
+    builtin_display: bool,
+    notch_offset: u32,
+    notch_display_height: u32,
+) -> WindowFrame {
     let Some(screen) = NSScreen::mainScreen(mtm) else {
         return frame.clone();
     };
@@ -1267,16 +1368,25 @@ fn anchor_bar_frame(frame: &WindowFrame, mtm: MainThreadMarker) -> WindowFrame {
     let visible = screen.visibleFrame();
     let visible_top = visible.origin.y + visible.size.height;
     let full_top = full.origin.y + full.size.height;
+    let height = if builtin_display && notch_display_height > 0 {
+        notch_display_height as f64
+    } else {
+        frame.height
+    };
     let y = if visible_top < full_top {
         visible_top
     } else {
-        full_top - frame.height
+        full_top - height
     };
     WindowFrame {
         x: full.origin.x,
-        y,
+        y: y + if builtin_display {
+            notch_offset as f64
+        } else {
+            0.0
+        },
         width: full.size.width,
-        height: frame.height,
+        height,
     }
 }
 
@@ -1331,7 +1441,10 @@ impl Renderer for NativeRenderer {
     fn initialize(&mut self, config: &Config) -> Result<(), BarrsError> {
         self.state.bar_height = BAR_HEIGHT;
         self.state.item_spacing = config.bar.spacing as f64;
-        self.host.initialize(config)
+        self.host.initialize(config)?;
+        let layout = self.host.layout_geometry(config, self.state.bar_height)?;
+        self.state.set_layout_geometry(layout);
+        Ok(())
     }
 
     fn render_item(&mut self, snapshot: &RenderItemSnapshot) -> Result<(), BarrsError> {
@@ -2062,6 +2175,19 @@ mod tests {
 
         let plan = host_scene_plan(&renderer.state.scene());
         assert_eq!(plan.window.width, 320.0);
+    }
+
+    #[test]
+    fn center_reserved_range_uses_configured_notch_width() {
+        assert_eq!(super::center_reserved_range(300.0, 0, true), None);
+        assert_eq!(super::center_reserved_range(300.0, 80, false), None);
+        assert_eq!(
+            super::center_reserved_range(300.0, 80, true),
+            Some(super::CenterReservedRange {
+                start: 110.0,
+                end: 190.0,
+            })
+        );
     }
 
     #[test]
