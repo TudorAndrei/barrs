@@ -5,7 +5,7 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::config::{Config, HoverConfig, ItemConfig};
+use crate::config::{BarSection, Config, HoverConfig, ItemConfig};
 use crate::error::BarrsError;
 use crate::ipc::{EventKind, EventPayload};
 
@@ -309,8 +309,8 @@ impl NativeSurfaceState {
             },
         });
         self.items.sort_by(|left, right| {
-            placement_rank(&left.snapshot.placement)
-                .cmp(&placement_rank(&right.snapshot.placement))
+            section_rank(&left.snapshot.placement)
+                .cmp(&section_rank(&right.snapshot.placement))
                 .then_with(|| left.snapshot.order.cmp(&right.snapshot.order))
         });
         self.relayout();
@@ -1397,13 +1397,10 @@ fn diff_host_scene(previous: Option<&HostScenePlan>, next: &HostScenePlan) -> Ve
     commands
 }
 
-fn placement_rank(placement: &Option<String>) -> u8 {
-    match placement.as_deref() {
-        Some("left") => 0,
-        Some("center") => 1,
-        Some("right") => 2,
-        _ => 3,
-    }
+fn section_rank(placement: &Option<String>) -> u8 {
+    BarSection::from_placement(placement.as_deref())
+        .unwrap_or(BarSection::Left)
+        .rank()
 }
 
 #[cfg(target_os = "macos")]
@@ -1465,9 +1462,9 @@ mod tests {
     use crate::ipc::{EventKind, EventPayload, Modifiers, MouseState};
 
     use super::{
-        create_renderer, diff_host_scene, host_scene_plan, parse_hex_color, HostCommand,
-        HostRuntimeState, HoverSurface, InteractiveSnapshot, LayerMutation, MockNativeHost,
-        NativeHost, NativeRenderer, NoopRenderer, RenderItemSnapshot, Renderer, RendererKind,
+        HostCommand, HostRuntimeState, HoverSurface, InteractiveSnapshot, LayerMutation,
+        MockNativeHost, NativeHost, NativeRenderer, NoopRenderer, RenderItemSnapshot, Renderer,
+        RendererKind, create_renderer, diff_host_scene, host_scene_plan, parse_hex_color,
     };
 
     #[test]
@@ -1537,6 +1534,7 @@ mod tests {
             bar: crate::config::BarConfig {
                 spacing: 3,
                 background: None,
+                ..crate::config::BarConfig::default()
             },
             ..Config::default()
         };
@@ -1615,6 +1613,99 @@ mod tests {
     }
 
     #[test]
+    fn section_rank_treats_middle_as_center() {
+        assert_eq!(super::section_rank(&Some("left".into())), 0);
+        assert_eq!(super::section_rank(&Some("middle".into())), 1);
+        assert_eq!(super::section_rank(&Some("center".into())), 1);
+        assert_eq!(super::section_rank(&Some("right".into())), 2);
+        assert_eq!(super::section_rank(&Some("unknown".into())), 0);
+        assert_eq!(super::section_rank(&None), 0);
+    }
+
+    #[test]
+    fn native_renderer_preserves_order_within_sections() {
+        let mut renderer = NativeRenderer::new(Box::new(MockNativeHost::default()));
+        renderer.initialize(&Config::default()).expect("initialize");
+
+        for snapshot in [
+            RenderItemSnapshot {
+                id: "right".into(),
+                order: 4,
+                label: None,
+                icon: None,
+                placement: Some("right".into()),
+                text: "right".into(),
+                hover: None,
+                interactive: InteractiveSnapshot {
+                    click: false,
+                    right_click: false,
+                    scroll: false,
+                    hover: false,
+                },
+                data: json!({ "text": "right" }),
+            },
+            RenderItemSnapshot {
+                id: "left-2".into(),
+                order: 2,
+                label: None,
+                icon: None,
+                placement: Some("left".into()),
+                text: "left-2".into(),
+                hover: None,
+                interactive: InteractiveSnapshot {
+                    click: false,
+                    right_click: false,
+                    scroll: false,
+                    hover: false,
+                },
+                data: json!({ "text": "left-2" }),
+            },
+            RenderItemSnapshot {
+                id: "middle".into(),
+                order: 3,
+                label: None,
+                icon: None,
+                placement: Some("middle".into()),
+                text: "middle".into(),
+                hover: None,
+                interactive: InteractiveSnapshot {
+                    click: false,
+                    right_click: false,
+                    scroll: false,
+                    hover: false,
+                },
+                data: json!({ "text": "middle" }),
+            },
+            RenderItemSnapshot {
+                id: "left-1".into(),
+                order: 1,
+                label: None,
+                icon: None,
+                placement: None,
+                text: "left-1".into(),
+                hover: None,
+                interactive: InteractiveSnapshot {
+                    click: false,
+                    right_click: false,
+                    scroll: false,
+                    hover: false,
+                },
+                data: json!({ "text": "left-1" }),
+            },
+        ] {
+            renderer.render_item(&snapshot).expect("render item");
+        }
+
+        let ids = renderer
+            .surface_state()
+            .items
+            .iter()
+            .map(|item| item.snapshot.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["left-1", "left-2", "middle", "right"]);
+    }
+
+    #[test]
     fn updating_percentage_item_does_not_shift_following_items() {
         let mut renderer = NativeRenderer::new(Box::new(MockNativeHost::default()));
         renderer
@@ -1622,6 +1713,7 @@ mod tests {
                 bar: crate::config::BarConfig {
                     spacing: 0,
                     background: None,
+                    ..crate::config::BarConfig::default()
                 },
                 ..Config::default()
             })
@@ -1731,6 +1823,7 @@ mod tests {
                 bar: crate::config::BarConfig {
                     spacing: 4,
                     background: None,
+                    ..crate::config::BarConfig::default()
                 },
                 ..Config::default()
             })
