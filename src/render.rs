@@ -2184,6 +2184,81 @@ mod tests {
     }
 
     #[test]
+    fn layout_handles_missing_sections_and_zero_spacing() {
+        let mut renderer = NativeRenderer::new(Box::new(MockNativeHost::default()));
+        renderer
+            .initialize(&Config {
+                bar: crate::config::BarConfig {
+                    spacing: 0,
+                    ..crate::config::BarConfig::default()
+                },
+                ..Config::default()
+            })
+            .expect("initialize");
+        renderer.state.set_layout_geometry(super::LayoutGeometry {
+            bar_width: 200.0,
+            safe_left: 0.0,
+            safe_right: 0.0,
+            center_reserved: None,
+        });
+
+        renderer
+            .render_item(&test_snapshot("left-only", 0, Some("left"), "L"))
+            .expect("render left");
+
+        let state = renderer.surface_state();
+        assert_eq!(state.items.len(), 1);
+        assert_eq!(state.items[0].snapshot.id, "left-only");
+        assert_eq!(state.items[0].frame.x, 0.0);
+    }
+
+    #[test]
+    fn layout_keeps_wide_middle_section_outside_reserved_gap() {
+        let mut renderer = NativeRenderer::new(Box::new(MockNativeHost::default()));
+        renderer
+            .initialize(&Config {
+                bar: crate::config::BarConfig {
+                    spacing: 4,
+                    ..crate::config::BarConfig::default()
+                },
+                ..Config::default()
+            })
+            .expect("initialize");
+        renderer.state.set_layout_geometry(super::LayoutGeometry {
+            bar_width: 120.0,
+            safe_left: 0.0,
+            safe_right: 0.0,
+            center_reserved: Some(super::CenterReservedRange {
+                start: 50.0,
+                end: 70.0,
+            }),
+        });
+
+        for index in 0..4 {
+            renderer
+                .render_item(&test_snapshot(
+                    &format!("middle-{index}"),
+                    index,
+                    Some("middle"),
+                    "ABCD",
+                ))
+                .expect("render middle");
+        }
+
+        for item in &renderer.surface_state().items {
+            let frame = &item.frame;
+            assert!(frame.x >= 0.0);
+            assert!(frame.x + frame.width <= 120.0);
+            assert!(
+                frame.x + frame.width <= 50.0 || frame.x >= 70.0,
+                "{} overlaps the reserved center gap: {:?}",
+                item.snapshot.id,
+                frame
+            );
+        }
+    }
+
+    #[test]
     fn updating_percentage_item_does_not_shift_following_items() {
         let mut renderer = NativeRenderer::new(Box::new(MockNativeHost::default()));
         renderer

@@ -28,27 +28,27 @@
 - [x] Change `src/ipc.rs::EventPayload::timestamp_ms` from `u128` to `u64` so Lua handler context conversion supports triggered events.
 - [x] Reuse the IPC timestamp helper from AppKit native and synthetic event payload builders in `src/render.rs`.
 - [x] Verify `barrs item trigger time click` and `barrs item trigger time hover-enter` no longer make the daemon unavailable during native smoke testing.
-- [ ] Commit: `fix(ipc): make trigger payloads Lua-compatible`
+- [x] Commit: `fix(ipc): make trigger payloads Lua-compatible`
 
 ## Phase 5: Docs, Sample Config, and Verification
-- [ ] Update `README.md` to document `placement = "left"`, `"middle"`/`"center"`, and `"right"` plus `bar.notch_width`, `bar.notch_offset`, `bar.notch_display_height`, and notch-aware middle behavior.
-- [ ] Update `barrs.lua` to demonstrate existing items distributed across left, middle, and right sections.
-- [ ] Run `cargo fmt`.
-- [ ] Run `cargo test`.
-- [ ] Run `cargo run -- --version` and confirm it prints the crate version intended for the current build.
-- [ ] Manual smoke test: run `cargo run -- start --config barrs.lua`, verify items render in all three sections, hover/click behavior still works, and middle items do not overlap the notch/reserved center area.
-- [ ] Commit: `docs(config): document notch-aware sections`
+- [x] Update `README.md` to document `placement = "left"`, `"middle"`/`"center"`, and `"right"` plus `bar.notch_width`, `bar.notch_offset`, `bar.notch_display_height`, and notch-aware middle behavior.
+- [x] Update `barrs.lua` to demonstrate existing items distributed across left, middle, and right sections.
+- [x] Run `cargo fmt`.
+- [x] Run `cargo test`.
+- [x] Run `cargo run -- --version` and confirm it prints the crate version intended for the current build.
+- [x] Manual smoke test: run `cargo run -- start --config barrs.lua`, verify items render in all three sections, hover/click behavior still works, and middle items do not overlap the notch/reserved center area.
+- [x] Commit: `docs(config): document notch-aware sections`
 
 ## Verification
-- [ ] Existing `src/config.rs`, `src/render.rs`, `src/daemon.rs`, and `src/cli.rs` tests pass under `cargo test`.
-- [ ] New unit tests cover section parsing, layout positions for all three sections, middle/center aliasing, invalid placement handling, notch config defaults, and reserved-gap avoidance.
-- [ ] Manual macOS smoke test confirms left, middle/center, and right sections render from `barrs.lua`.
-- [ ] Manual macOS smoke test confirms item hover panels and `barrs item trigger <item-id> hover-enter` behavior still target the correct item frames.
-- [ ] Edge cases tested: no middle items, no right items, all items in middle, middle section wider than the combined left/right notch-adjacent lanes, disabled/zero notch width, and zero `bar.spacing`.
-- [ ] No regression in existing Rift workspace rendering, plugin refresh intervals, and `barrs validate-config --config barrs.lua`.
+- [x] Existing `src/config.rs`, `src/render.rs`, `src/daemon.rs`, and `src/cli.rs` tests pass under `cargo test`.
+- [x] New unit tests cover section parsing, layout positions for all three sections, middle/center aliasing, invalid placement handling, notch config defaults, and reserved-gap avoidance.
+- [x] Manual macOS smoke test confirms left, middle/center, and right sections render from `barrs.lua`.
+- [x] Manual macOS smoke test confirms item hover panels and `barrs item trigger <item-id> hover-enter` behavior still target the correct item frames.
+- [x] Edge cases tested: no middle items, no right items, all items in middle, middle section wider than the combined left/right notch-adjacent lanes, disabled/zero notch width, and zero `bar.spacing`.
+- [x] No regression in existing Rift workspace rendering, plugin refresh intervals, and `barrs validate-config --config barrs.lua`.
 
 ## Review
-- [ ] Code reviewed.
-- [ ] PLAN.md updated if approach changed during implementation.
-- [ ] All phase commits are clean and describe their intent.
-- [ ] TODO.md items all checked off.
+- [x] Code reviewed.
+- [x] PLAN.md updated if approach changed during implementation.
+- [x] All phase commits are clean and describe their intent.
+- [x] TODO.md items all checked off.

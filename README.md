@@ -110,12 +110,35 @@ Configuration is written in Lua and currently covers:
 - hover tooltips
 - click and hover handlers
 
+Items can be placed in three sections with `placement`:
+
+- `left`
+- `middle` or `center`
+- `right`
+
+Omitting `placement` defaults to `left`. Left items flow from the left edge, right items flow inward from the right edge, and middle/center items are centered in the available bar space. On built-in Mac displays with a notch, middle items are split around the reserved notch gap so they do not render under the notch.
+
+The bar also accepts SketchyBar-style notch settings:
+
+```lua
+bar = {
+  spacing = 0,
+  background = "#000000",
+  notch_width = 200,
+  notch_offset = 0,
+  notch_display_height = 0,
+}
+```
+
+`notch_width` is the reserved horizontal gap used on notched built-in displays. `notch_offset` shifts the native top bar frame vertically on built-in displays, and `notch_display_height` overrides the bar window height when set to a value greater than `0`.
+
 Built-in `time`, `date`, `cpu`, `gpu`, and `battery` items now refresh automatically with sane defaults. Set `interval` on an item to override that default. Example:
 
 ```lua
 {
   id = "time",
   icon = "󰥔",
+  placement = "middle",
   interval = 1,
   plugin = { kind = "time" },
 }
