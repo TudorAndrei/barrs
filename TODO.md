@@ -1,0 +1,60 @@
+# TODO: Daemon Hardening and Release Gates
+
+## Phase 1: Characterize IPC-triggered Lua handlers
+- [x] Add daemon IPC tests in `src/daemon.rs` that send `Request::TriggerItem` through `send_request`.
+- [x] Use a temporary Lua config whose click handler writes an observable marker under the temp directory.
+- [x] Assert the known-item click returns `Response::Ok` and executes the Lua handler.
+- [x] Add a negative-path daemon event test if it can remain deterministic.
+- [x] Run `cargo test daemon::tests`.
+- [ ] Commit: `test(daemon): cover ipc-triggered lua handlers`
+
+## Phase 2: Harden daemon IPC and socket lifecycle
+- [ ] Remove `Request::ValidateConfig { path }` from `src/ipc.rs`.
+- [ ] Remove the `Request::ValidateConfig` branch from `Daemon::handle_request` in `src/daemon.rs`.
+- [ ] Confirm `Command::ValidateConfig` in `src/app.rs` still validates locally through `config::load_config`.
+- [ ] Change `default_socket_path()` in `src/ipc.rs` to use a per-user temp directory path.
+- [ ] Update `Config::default` and `load_config` in `src/config.rs` to use `default_socket_path()`.
+- [ ] Update tests that currently assume `/tmp/barrs.sock`.
+- [ ] Change `cleanup_socket` in `src/daemon.rs` so it removes only Unix socket files.
+- [ ] Add socket cleanup tests proving regular files are not deleted.
+- [ ] Run `cargo test ipc::tests config::tests daemon::tests`.
+- [ ] Commit: `fix(daemon): harden local ipc socket handling`
+
+## Phase 3: Add a normal CI gate
+- [ ] Add `.github/workflows/ci.yml`.
+- [ ] Configure CI for `pull_request` and pushes to `main`.
+- [ ] Use `actions/checkout@v5`.
+- [ ] Run `cargo check --all-targets` in CI.
+- [ ] Run `cargo test` in CI.
+- [ ] Keep the workflow without write permissions or release credentials.
+- [ ] Run `cargo test` locally.
+- [ ] Run `cargo check --all-targets` locally.
+- [ ] Commit: `ci: add rust verification workflow`
+
+## Phase 4: Guard manual release dispatch
+- [ ] Add a required `tag` input for `workflow_dispatch` in `.github/workflows/release.yml`.
+- [ ] Resolve one `TAG` value for both tag-push and manual-dispatch runs.
+- [ ] Add an early validation step that rejects non-`v[0-9]*` tags.
+- [ ] Update packaging archive names to use the resolved `TAG`.
+- [ ] Update release publication and formula generation to use the resolved `TAG`.
+- [ ] Preserve existing `push.tags: "v*"` behavior.
+- [ ] Review final YAML syntax for GitHub Actions compatibility.
+- [ ] Commit: `fix(release): require explicit tag for manual releases`
+
+## Verification
+- [ ] `cargo test` passes.
+- [ ] `cargo check --all-targets` passes.
+- [ ] New tests cover IPC `TriggerItem` executing a Lua handler through the daemon socket.
+- [ ] New tests cover missing/unknown event handling if added in Phase 1.
+- [ ] New tests cover default socket path behavior without hard-coding `/tmp/barrs.sock`.
+- [ ] New tests cover socket cleanup refusing to delete a regular file.
+- [ ] Manual smoke test: `cargo run -- validate-config --config barrs.lua` still validates locally.
+- [ ] Manual smoke test: start the daemon with a temp `--socket`, run `ping`, `item trigger`, and `stop` against that socket.
+- [ ] Release workflow review confirms manual dispatch cannot package a branch name as a release tag.
+- [ ] No regressions in `reload`, `status`, `dump-state`, `rift backend`, or `item trigger` CLI behavior.
+
+## Review
+- [ ] Code reviewed.
+- [ ] PLAN.md updated if approach changed during implementation.
+- [ ] All phase commits are clean and describe their intent.
+- [ ] TODO.md items all checked off.
