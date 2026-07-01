@@ -29,16 +29,16 @@
 - [x] Keep the workflow without write permissions or release credentials.
 - [x] Run `cargo test` locally.
 - [x] Run `cargo check --all-targets` locally.
-- [ ] Commit: `ci: add rust verification workflow`
+- [x] Commit: `ci: add rust verification workflow`
 
 ## Phase 4: Guard manual release dispatch
-- [ ] Add a required `tag` input for `workflow_dispatch` in `.github/workflows/release.yml`.
-- [ ] Resolve one `TAG` value for both tag-push and manual-dispatch runs.
-- [ ] Add an early validation step that rejects non-`v[0-9]*` tags.
-- [ ] Update packaging archive names to use the resolved `TAG`.
-- [ ] Update release publication and formula generation to use the resolved `TAG`.
-- [ ] Preserve existing `push.tags: "v*"` behavior.
-- [ ] Review final YAML syntax for GitHub Actions compatibility.
+- [x] Add a required `tag` input for `workflow_dispatch` in `.github/workflows/release.yml`.
+- [x] Resolve one `TAG` value for both tag-push and manual-dispatch runs.
+- [x] Add an early validation step that rejects non-`v[0-9]*` tags.
+- [x] Update packaging archive names to use the resolved `TAG`.
+- [x] Update release publication and formula generation to use the resolved `TAG`.
+- [x] Preserve existing `push.tags: "v*"` behavior.
+- [x] Review final YAML syntax for GitHub Actions compatibility.
 - [ ] Commit: `fix(release): require explicit tag for manual releases`
 
 ## Verification
