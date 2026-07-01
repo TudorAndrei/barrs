@@ -18,17 +18,17 @@
 - [x] Change `cleanup_socket` in `src/daemon.rs` so it removes only Unix socket files.
 - [x] Add socket cleanup tests proving regular files are not deleted.
 - [x] Run `cargo test ipc::tests`, `cargo test config::tests`, and `cargo test daemon::tests`.
-- [ ] Commit: `fix(daemon): harden local ipc socket handling`
+- [x] Commit: `fix(daemon): harden local ipc socket handling`
 
 ## Phase 3: Add a normal CI gate
-- [ ] Add `.github/workflows/ci.yml`.
-- [ ] Configure CI for `pull_request` and pushes to `main`.
-- [ ] Use `actions/checkout@v5`.
-- [ ] Run `cargo check --all-targets` in CI.
-- [ ] Run `cargo test` in CI.
-- [ ] Keep the workflow without write permissions or release credentials.
-- [ ] Run `cargo test` locally.
-- [ ] Run `cargo check --all-targets` locally.
+- [x] Add `.github/workflows/ci.yml`.
+- [x] Configure CI for `pull_request` and pushes to `main`.
+- [x] Use `actions/checkout@v5`.
+- [x] Run `cargo check --all-targets` in CI.
+- [x] Run `cargo test` in CI.
+- [x] Keep the workflow without write permissions or release credentials.
+- [x] Run `cargo test` locally.
+- [x] Run `cargo check --all-targets` locally.
 - [ ] Commit: `ci: add rust verification workflow`
 
 ## Phase 4: Guard manual release dispatch
