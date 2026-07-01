@@ -62,5 +62,5 @@ Out of scope: changing release tagging policy, publishing to crates.io, changing
 - GitHub Actions expression syntax is easy to get subtly wrong. Keep the release workflow change small and prefer simple shell validation of the resolved tag.
 
 ## Open Questions
-- Should the default socket path change be documented in `README.md`, or is it enough to keep `--socket` and `socket_path` as the documented escape hatch?
-- Should the CI workflow include `cargo fmt --check` and Clippy now, or should this first gate stay limited to the existing verified commands, `cargo check --all-targets` and `cargo test`?
+- None remaining. The README did not document the old `/tmp/barrs.sock` default, so the implementation keeps documentation unchanged and leaves `--socket` / `socket_path` as the explicit escape hatches.
+- The first CI gate is intentionally limited to the existing verified commands, `cargo check --all-targets` and `cargo test`; `cargo fmt --check` and Clippy can be added later as a separate policy decision.

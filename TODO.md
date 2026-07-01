@@ -39,22 +39,22 @@
 - [x] Update release publication and formula generation to use the resolved `TAG`.
 - [x] Preserve existing `push.tags: "v*"` behavior.
 - [x] Review final YAML syntax for GitHub Actions compatibility.
-- [ ] Commit: `fix(release): require explicit tag for manual releases`
+- [x] Commit: `fix(release): require explicit tag for manual releases`
 
 ## Verification
-- [ ] `cargo test` passes.
-- [ ] `cargo check --all-targets` passes.
-- [ ] New tests cover IPC `TriggerItem` executing a Lua handler through the daemon socket.
-- [ ] New tests cover missing/unknown event handling if added in Phase 1.
-- [ ] New tests cover default socket path behavior without hard-coding `/tmp/barrs.sock`.
-- [ ] New tests cover socket cleanup refusing to delete a regular file.
-- [ ] Manual smoke test: `cargo run -- validate-config --config barrs.lua` still validates locally.
-- [ ] Manual smoke test: start the daemon with a temp `--socket`, run `ping`, `item trigger`, and `stop` against that socket.
-- [ ] Release workflow review confirms manual dispatch cannot package a branch name as a release tag.
-- [ ] No regressions in `reload`, `status`, `dump-state`, `rift backend`, or `item trigger` CLI behavior.
+- [x] `cargo test` passes.
+- [x] `cargo check --all-targets` passes.
+- [x] New tests cover IPC `TriggerItem` executing a Lua handler through the daemon socket.
+- [x] New tests cover missing/unknown event handling if added in Phase 1.
+- [x] New tests cover default socket path behavior without hard-coding `/tmp/barrs.sock`.
+- [x] New tests cover socket cleanup refusing to delete a regular file.
+- [x] Manual smoke test: `cargo run -- validate-config --config barrs.lua` still validates locally.
+- [x] Manual smoke test: start the daemon with a temp `--socket`, run `ping`, `item trigger`, and `stop` against that socket.
+- [x] Release workflow review confirms manual dispatch cannot package a branch name as a release tag.
+- [x] No regressions in `reload`, `status`, `dump-state`, `rift backend`, or `item trigger` CLI behavior.
 
 ## Review
-- [ ] Code reviewed.
-- [ ] PLAN.md updated if approach changed during implementation.
-- [ ] All phase commits are clean and describe their intent.
-- [ ] TODO.md items all checked off.
+- [x] Code reviewed.
+- [x] PLAN.md updated if approach changed during implementation.
+- [x] All phase commits are clean and describe their intent.
+- [x] TODO.md items all checked off.
