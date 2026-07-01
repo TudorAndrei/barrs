@@ -1,4 +1,10 @@
 use std::collections::HashMap;
+#[cfg(target_os = "macos")]
+use std::ffi::c_void;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "macos")]
+use std::time::{Duration, Instant};
 
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
@@ -17,7 +23,11 @@ use objc2_app_kit::{
     NSScreen, NSStatusWindowLevel, NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
 #[cfg(target_os = "macos")]
-use objc2_core_graphics::CGDisplayIsBuiltin;
+use objc2_core_graphics::{
+    CGDisplayBounds, CGDisplayChangeSummaryFlags, CGDisplayIsBuiltin,
+    CGDisplayRegisterReconfigurationCallback, CGDisplayRemoveReconfigurationCallback, CGError,
+    CGMainDisplayID,
+};
 #[cfg(target_os = "macos")]
 use objc2_foundation::{MainThreadMarker, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, NSString};
 
@@ -40,6 +50,12 @@ const ITEM_TEXT_HEIGHT: f64 = 18.0;
 const ITEM_TRAILING_TEXT_PADDING: f64 = 0.0;
 const BAR_HEIGHT: f64 = 28.0;
 const DEFAULT_ITEM_SPACING: f64 = 6.0;
+#[cfg(target_os = "macos")]
+const DISPLAY_RECONFIGURATION_SETTLE_MS: u64 = 500;
+#[cfg(target_os = "macos")]
+const DISPLAY_RECONFIGURATION_RETRY_MS: u64 = 1000;
+#[cfg(target_os = "macos")]
+const DISPLAY_RECONFIGURATION_REBUILDS: u8 = 3;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum RendererKind {
     Native,
@@ -618,7 +634,11 @@ struct AppKitHost {
     pending_events: Vec<EventPayload>,
     pointer_item: Option<String>,
     background: Option<String>,
-    builtin_display: bool,
+    current_screen_signature: Option<ScreenSignature>,
+    display_reconfiguration_pending: Option<Box<AtomicBool>>,
+    display_reconfiguration_deadline: Option<Instant>,
+    display_reconfiguration_rebuilds_remaining: u8,
+    display_callback_registered: bool,
     notch_offset: u32,
     notch_display_height: u32,
 }
@@ -640,7 +660,11 @@ impl Default for AppKitHost {
             pending_events: Vec::new(),
             pointer_item: None,
             background: None,
-            builtin_display: false,
+            current_screen_signature: None,
+            display_reconfiguration_pending: None,
+            display_reconfiguration_deadline: None,
+            display_reconfiguration_rebuilds_remaining: 0,
+            display_callback_registered: false,
             notch_offset: 0,
             notch_display_height: 0,
         }
@@ -660,18 +684,10 @@ impl NativeHost for AppKitHost {
         let app = NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
         self.background = config.bar.background.clone();
-        self.builtin_display = main_screen_is_builtin(mtm);
-        self.notch_offset = if self.builtin_display {
-            config.bar.notch_offset
-        } else {
-            0
-        };
-        self.notch_display_height = if self.builtin_display {
-            config.bar.notch_display_height
-        } else {
-            0
-        };
+        self.notch_offset = config.bar.notch_offset;
+        self.notch_display_height = config.bar.notch_display_height;
         self.app = Some(app);
+        self.register_display_reconfiguration_callback()?;
         Ok(())
     }
 
@@ -681,10 +697,11 @@ impl NativeHost for AppKitHost {
         _bar_height: f64,
     ) -> Result<LayoutGeometry, BarrsError> {
         let mtm = main_thread_marker()?;
-        Ok(main_screen_layout_geometry(config, mtm))
+        Ok(bar_screen_layout_geometry(config, mtm))
     }
 
     fn present(&mut self, scene: &BarScene) -> Result<(), BarrsError> {
+        self.prepare_for_target_display()?;
         let next_plan = host_scene_plan(scene);
         let commands = diff_host_scene(self.last_plan.as_ref(), &next_plan);
         self.last_scene = Some(scene.clone());
@@ -699,12 +716,157 @@ impl NativeHost for AppKitHost {
         self.pump_events()?;
         let hover_events = self.poll_hover_payloads();
         self.pending_events.extend(hover_events);
+        self.update_display_reconfiguration_schedule();
+        let screen_changed = self.target_screen_changed()?;
+        let reconfiguration_rebuild_due = self.display_reconfiguration_rebuild_due();
+        if screen_changed || reconfiguration_rebuild_due {
+            if reconfiguration_rebuild_due {
+                self.invalidate_native_window("display-reconfiguration-rebuild");
+            }
+            if let Some(scene) = self.last_scene.clone() {
+                self.present(&scene)?;
+            }
+        }
         Ok(std::mem::take(&mut self.pending_events))
     }
 }
 
 #[cfg(target_os = "macos")]
+impl Drop for AppKitHost {
+    fn drop(&mut self) {
+        if !self.display_callback_registered {
+            return;
+        }
+
+        if let Some(flag) = self.display_reconfiguration_pending.as_ref() {
+            unsafe {
+                CGDisplayRemoveReconfigurationCallback(
+                    Some(display_reconfiguration_callback),
+                    flag.as_ref() as *const AtomicBool as *mut c_void,
+                );
+            }
+        }
+        self.display_callback_registered = false;
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C-unwind" fn display_reconfiguration_callback(
+    _display: u32,
+    flags: CGDisplayChangeSummaryFlags,
+    user_info: *mut c_void,
+) {
+    if user_info.is_null() || flags.contains(CGDisplayChangeSummaryFlags::BeginConfigurationFlag) {
+        return;
+    }
+
+    let relevant = CGDisplayChangeSummaryFlags::MovedFlag
+        | CGDisplayChangeSummaryFlags::SetMainFlag
+        | CGDisplayChangeSummaryFlags::SetModeFlag
+        | CGDisplayChangeSummaryFlags::AddFlag
+        | CGDisplayChangeSummaryFlags::RemoveFlag
+        | CGDisplayChangeSummaryFlags::EnabledFlag
+        | CGDisplayChangeSummaryFlags::DisabledFlag
+        | CGDisplayChangeSummaryFlags::MirrorFlag
+        | CGDisplayChangeSummaryFlags::UnMirrorFlag
+        | CGDisplayChangeSummaryFlags::DesktopShapeChangedFlag;
+
+    if flags.intersects(relevant) {
+        let pending = unsafe { &*(user_info as *const AtomicBool) };
+        pending.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(target_os = "macos")]
 impl AppKitHost {
+    fn register_display_reconfiguration_callback(&mut self) -> Result<(), BarrsError> {
+        if self.display_callback_registered {
+            return Ok(());
+        }
+
+        let flag = self
+            .display_reconfiguration_pending
+            .get_or_insert_with(|| Box::new(AtomicBool::new(false)));
+        let result = unsafe {
+            CGDisplayRegisterReconfigurationCallback(
+                Some(display_reconfiguration_callback),
+                flag.as_ref() as *const AtomicBool as *mut c_void,
+            )
+        };
+        if result != CGError::Success {
+            return Err(BarrsError::Unsupported(format!(
+                "failed to register display reconfiguration callback: {result:?}"
+            )));
+        }
+        self.display_callback_registered = true;
+        Ok(())
+    }
+
+    fn take_display_reconfiguration_pending(&self) -> bool {
+        self.display_reconfiguration_pending
+            .as_ref()
+            .map(|flag| flag.swap(false, Ordering::AcqRel))
+            .unwrap_or(false)
+    }
+
+    fn update_display_reconfiguration_schedule(&mut self) {
+        if !self.take_display_reconfiguration_pending() {
+            return;
+        }
+
+        debug_display_state("display-reconfiguration-callback", None);
+        self.invalidate_native_window("display-reconfiguration-start");
+        self.display_reconfiguration_rebuilds_remaining = DISPLAY_RECONFIGURATION_REBUILDS;
+        self.display_reconfiguration_deadline =
+            Some(Instant::now() + Duration::from_millis(DISPLAY_RECONFIGURATION_SETTLE_MS));
+    }
+
+    fn display_reconfiguration_rebuild_due(&mut self) -> bool {
+        let Some(deadline) = self.display_reconfiguration_deadline else {
+            return false;
+        };
+        if Instant::now() < deadline {
+            return false;
+        }
+
+        if self.display_reconfiguration_rebuilds_remaining > 0 {
+            self.display_reconfiguration_rebuilds_remaining -= 1;
+        }
+        if self.display_reconfiguration_rebuilds_remaining > 0 {
+            self.display_reconfiguration_deadline =
+                Some(Instant::now() + Duration::from_millis(DISPLAY_RECONFIGURATION_RETRY_MS));
+        } else {
+            self.display_reconfiguration_deadline = None;
+        }
+        true
+    }
+
+    fn invalidate_native_window(&mut self, reason: &str) {
+        debug_display_state(reason, None);
+        if let Some(window) = self.window.take() {
+            window.orderOut(None);
+        }
+        self.content_view = None;
+        self.item_views.clear();
+        self.last_plan = None;
+        self.current_screen_signature = None;
+    }
+
+    fn prepare_for_target_display(&mut self) -> Result<(), BarrsError> {
+        let target_screen_signature = target_screen_signature()?;
+        if self.current_screen_signature == target_screen_signature {
+            return Ok(());
+        }
+
+        self.invalidate_native_window("target-screen-changed");
+        self.current_screen_signature = target_screen_signature;
+        Ok(())
+    }
+
+    fn target_screen_changed(&self) -> Result<bool, BarrsError> {
+        Ok(self.current_screen_signature != target_screen_signature()?)
+    }
+
     fn pump_events(&mut self) -> Result<(), BarrsError> {
         let Some(app) = self.app.clone() else {
             return Ok(());
@@ -883,10 +1045,10 @@ impl AppKitHost {
         let anchored = anchor_bar_frame(
             frame,
             mtm,
-            self.builtin_display,
             self.notch_offset,
             self.notch_display_height,
         );
+        debug_display_state("configure-window", Some(&anchored));
         let content_frame = WindowFrame {
             x: 0.0,
             y: 0.0,
@@ -1305,33 +1467,99 @@ fn hover_panel_frame_at(anchor_x: f64, anchor_y: f64, text: &str) -> WindowFrame
 }
 
 #[cfg(target_os = "macos")]
-fn main_screen_is_builtin(mtm: MainThreadMarker) -> bool {
-    NSScreen::mainScreen(mtm)
-        .map(|screen| CGDisplayIsBuiltin(screen.CGDirectDisplayID()))
-        .unwrap_or(false)
+fn bar_screen(mtm: MainThreadMarker) -> Option<objc2::rc::Retained<NSScreen>> {
+    let screens = NSScreen::screens(mtm);
+    let main_display = CGMainDisplayID();
+    for index in 0..screens.count() {
+        let screen = screens.objectAtIndex(index);
+        if screen.CGDirectDisplayID() == main_display {
+            return Some(screen);
+        }
+    }
+
+    NSScreen::mainScreen(mtm).or_else(|| screens.firstObject())
 }
 
 #[cfg(target_os = "macos")]
-fn main_screen_layout_geometry(config: &Config, mtm: MainThreadMarker) -> LayoutGeometry {
-    let Some(screen) = NSScreen::mainScreen(mtm) else {
+fn target_screen_signature() -> Result<Option<ScreenSignature>, BarrsError> {
+    let mtm = main_thread_marker()?;
+    Ok(bar_screen(mtm).map(|screen| ScreenSignature::from(&appkit_screen_geometry(&screen))))
+}
+
+#[cfg(target_os = "macos")]
+fn bar_screen_layout_geometry(config: &Config, mtm: MainThreadMarker) -> LayoutGeometry {
+    let Some(screen) = bar_screen(mtm) else {
         return LayoutGeometry::default();
     };
-    let full = screen.frame();
+    screen_layout_geometry(config, appkit_screen_geometry(&screen))
+}
+
+#[derive(Debug, Clone)]
+struct ScreenGeometry {
+    display_id: u32,
+    full: WindowFrame,
+    visible: WindowFrame,
+    builtin: bool,
+    notch_height: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScreenSignature {
+    display_id: u32,
+    x: i64,
+    y: i64,
+    width: i64,
+    height: i64,
+}
+
+impl From<&ScreenGeometry> for ScreenSignature {
+    fn from(screen: &ScreenGeometry) -> Self {
+        Self {
+            display_id: screen.display_id,
+            x: screen.full.x.round() as i64,
+            y: screen.full.y.round() as i64,
+            width: screen.full.width.round() as i64,
+            height: screen.full.height.round() as i64,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn appkit_screen_geometry(screen: &NSScreen) -> ScreenGeometry {
     let display_id = screen.CGDirectDisplayID();
     let builtin = CGDisplayIsBuiltin(display_id);
-    let notch_height = if builtin {
-        screen.safeAreaInsets().top.max(0.0)
-    } else {
-        0.0
-    };
+    ScreenGeometry {
+        display_id,
+        full: window_frame_from_rect(screen.frame()),
+        visible: window_frame_from_rect(screen.visibleFrame()),
+        builtin,
+        notch_height: if builtin {
+            screen.safeAreaInsets().top.max(0.0)
+        } else {
+            0.0
+        },
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn window_frame_from_rect(rect: NSRect) -> WindowFrame {
+    WindowFrame {
+        x: rect.origin.x,
+        y: rect.origin.y,
+        width: rect.size.width,
+        height: rect.size.height,
+    }
+}
+
+fn screen_layout_geometry(config: &Config, screen: ScreenGeometry) -> LayoutGeometry {
     LayoutGeometry {
-        bar_width: full.size.width,
+        bar_width: screen.full.width,
         safe_left: 0.0,
         safe_right: 0.0,
         center_reserved: center_reserved_range(
-            full.size.width,
+            screen.full.width,
             config.bar.notch_width,
-            builtin && notch_height > 0.0,
+            screen.builtin && screen.notch_height > 0.0,
         ),
     }
 }
@@ -1356,36 +1584,97 @@ fn center_reserved_range(
 fn anchor_bar_frame(
     frame: &WindowFrame,
     mtm: MainThreadMarker,
-    builtin_display: bool,
     notch_offset: u32,
     notch_display_height: u32,
 ) -> WindowFrame {
-    let Some(screen) = NSScreen::mainScreen(mtm) else {
+    let Some(screen) = bar_screen(mtm) else {
         return frame.clone();
     };
-    let full = screen.frame();
-    let visible = screen.visibleFrame();
-    let visible_top = visible.origin.y + visible.size.height;
-    let full_top = full.origin.y + full.size.height;
-    let height = if builtin_display && notch_display_height > 0 {
+    anchor_bar_frame_for_screen(
+        frame,
+        appkit_screen_geometry(&screen),
+        notch_offset,
+        notch_display_height,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn debug_display_state(reason: &str, anchored: Option<&WindowFrame>) {
+    if std::env::var_os("BARRS_DEBUG_DISPLAYS").is_none() {
+        return;
+    }
+
+    let Ok(mtm) = main_thread_marker() else {
+        eprintln!("[barrs-display] {reason}: no main thread marker");
+        return;
+    };
+    let main_display = CGMainDisplayID();
+    eprintln!("[barrs-display] {reason}: main_display={main_display}");
+    if let Some(anchored) = anchored {
+        eprintln!("[barrs-display] {reason}: anchored={anchored:?}");
+    }
+
+    let screens = NSScreen::screens(mtm);
+    for index in 0..screens.count() {
+        let screen = screens.objectAtIndex(index);
+        let display_id = screen.CGDirectDisplayID();
+        let frame = screen.frame();
+        let visible = screen.visibleFrame();
+        let cg = CGDisplayBounds(display_id);
+        eprintln!(
+            "[barrs-display] {reason}: screen[{index}] id={display_id} is_main={} frame=({}, {}, {}, {}) visible=({}, {}, {}, {}) cg=({}, {}, {}, {}) safe_top={} scale={}",
+            display_id == main_display,
+            frame.origin.x,
+            frame.origin.y,
+            frame.size.width,
+            frame.size.height,
+            visible.origin.x,
+            visible.origin.y,
+            visible.size.width,
+            visible.size.height,
+            cg.origin.x,
+            cg.origin.y,
+            cg.size.width,
+            cg.size.height,
+            screen.safeAreaInsets().top,
+            screen.backingScaleFactor()
+        );
+    }
+}
+
+fn anchor_bar_frame_for_screen(
+    frame: &WindowFrame,
+    screen: ScreenGeometry,
+    notch_offset: u32,
+    notch_display_height: u32,
+) -> WindowFrame {
+    let visible_top = screen.visible.y + screen.visible.height;
+    let full_top = screen.full.y + screen.full.height;
+    let height = if screen.builtin && notch_display_height > 0 {
         notch_display_height as f64
     } else {
         frame.height
     };
-    let y = if visible_top < full_top {
-        visible_top
-    } else {
-        full_top - height
-    };
+    let y = bar_window_y(full_top, visible_top, height);
     WindowFrame {
-        x: full.origin.x,
-        y: y + if builtin_display {
+        x: screen.full.x,
+        y: y + if screen.builtin {
             notch_offset as f64
         } else {
             0.0
         },
-        width: full.size.width,
+        width: screen.full.width,
         height,
+    }
+}
+
+fn bar_window_y(full_top: f64, visible_top: f64, height: f64) -> f64 {
+    let top_inset = full_top - visible_top;
+    let max_menu_bar_inset = (height * 3.0).max(96.0);
+    if top_inset.is_finite() && top_inset > 0.0 && top_inset <= max_menu_bar_inset {
+        visible_top
+    } else {
+        full_top - height
     }
 }
 
@@ -1410,6 +1699,7 @@ pub fn create_renderer(kind: RendererKind) -> Result<Box<dyn Renderer>, BarrsErr
 pub struct NativeRenderer {
     state: NativeSurfaceState,
     host: Box<dyn NativeHost>,
+    config: Option<Config>,
 }
 
 impl NativeRenderer {
@@ -1417,6 +1707,7 @@ impl NativeRenderer {
         Self {
             state: NativeSurfaceState::default(),
             host,
+            config: None,
         }
     }
 
@@ -1425,8 +1716,24 @@ impl NativeRenderer {
     }
 
     fn publish_scene(&mut self) -> Result<(), BarrsError> {
+        self.refresh_layout_geometry()?;
         let scene = self.state.scene();
         self.host.present(&scene)
+    }
+
+    fn refresh_layout_geometry(&mut self) -> Result<bool, BarrsError> {
+        let Some(config) = self.config.as_ref() else {
+            return Ok(false);
+        };
+        let layout = self.host.layout_geometry(config, self.state.bar_height)?;
+        if layout == LayoutGeometry::default() {
+            return Ok(false);
+        }
+        if self.state.layout != layout {
+            self.state.set_layout_geometry(layout);
+            return Ok(true);
+        }
+        Ok(false)
     }
 }
 
@@ -1440,6 +1747,7 @@ impl Renderer for NativeRenderer {
     fn initialize(&mut self, config: &Config) -> Result<(), BarrsError> {
         self.state.bar_height = BAR_HEIGHT;
         self.state.item_spacing = config.bar.spacing as f64;
+        self.config = Some(config.clone());
         self.host.initialize(config)?;
         let layout = self.host.layout_geometry(config, self.state.bar_height)?;
         self.state.set_layout_geometry(layout);
@@ -1453,7 +1761,12 @@ impl Renderer for NativeRenderer {
     }
 
     fn drain_events(&mut self) -> Result<Vec<EventPayload>, BarrsError> {
-        self.host.drain_events()
+        let events = self.host.drain_events()?;
+        if self.refresh_layout_geometry()? {
+            let scene = self.state.scene();
+            self.host.present(&scene)?;
+        }
+        Ok(events)
     }
 
     fn handle_event(&mut self, event: &EventPayload) -> Result<(), BarrsError> {
@@ -1784,6 +2097,9 @@ fn synthetic_event_payload(item_id: String, event: EventKind, x: f64, y: f64) ->
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
     use serde_json::json;
 
     use crate::config::{Config, HoverConfig, ItemConfig, ItemHandlers};
@@ -2181,6 +2497,217 @@ mod tests {
                 end: 190.0,
             })
         );
+    }
+
+    #[test]
+    fn screen_layout_geometry_reserves_notch_only_on_notched_builtin_screen() {
+        let config = Config {
+            bar: crate::config::BarConfig {
+                notch_width: 80,
+                ..crate::config::BarConfig::default()
+            },
+            ..Config::default()
+        };
+        let screen = super::ScreenGeometry {
+            display_id: 1,
+            full: super::WindowFrame {
+                x: 100.0,
+                y: 0.0,
+                width: 300.0,
+                height: 200.0,
+            },
+            visible: super::WindowFrame {
+                x: 100.0,
+                y: 0.0,
+                width: 300.0,
+                height: 180.0,
+            },
+            builtin: true,
+            notch_height: 24.0,
+        };
+
+        let layout = super::screen_layout_geometry(&config, screen.clone());
+        assert_eq!(layout.bar_width, 300.0);
+        assert_eq!(
+            layout.center_reserved,
+            Some(super::CenterReservedRange {
+                start: 110.0,
+                end: 190.0,
+            })
+        );
+
+        let external = super::ScreenGeometry {
+            builtin: false,
+            ..screen
+        };
+        assert_eq!(
+            super::screen_layout_geometry(&config, external).center_reserved,
+            None
+        );
+    }
+
+    #[test]
+    fn anchor_bar_frame_uses_screen_origin_and_builtin_notch_settings() {
+        let frame = super::WindowFrame {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 28.0,
+        };
+        let screen = super::ScreenGeometry {
+            display_id: 1,
+            full: super::WindowFrame {
+                x: 1440.0,
+                y: -200.0,
+                width: 1280.0,
+                height: 900.0,
+            },
+            visible: super::WindowFrame {
+                x: 1440.0,
+                y: -200.0,
+                width: 1280.0,
+                height: 860.0,
+            },
+            builtin: true,
+            notch_height: 24.0,
+        };
+
+        assert_eq!(
+            super::anchor_bar_frame_for_screen(&frame, screen, 2, 32),
+            super::WindowFrame {
+                x: 1440.0,
+                y: 662.0,
+                width: 1280.0,
+                height: 32.0,
+            }
+        );
+    }
+
+    #[test]
+    fn anchor_bar_frame_ignores_implausible_visible_top_after_hotplug() {
+        let frame = super::WindowFrame {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 28.0,
+        };
+        let screen = super::ScreenGeometry {
+            display_id: 1,
+            full: super::WindowFrame {
+                x: 0.0,
+                y: 0.0,
+                width: 2048.0,
+                height: 1280.0,
+            },
+            visible: super::WindowFrame {
+                x: 0.0,
+                y: 0.0,
+                width: 2048.0,
+                height: 170.0,
+            },
+            builtin: false,
+            notch_height: 0.0,
+        };
+
+        assert_eq!(
+            super::anchor_bar_frame_for_screen(&frame, screen, 0, 0),
+            super::WindowFrame {
+                x: 0.0,
+                y: 1252.0,
+                width: 2048.0,
+                height: 28.0,
+            }
+        );
+    }
+
+    struct ChangingLayoutHost {
+        calls: AtomicUsize,
+        scenes: Arc<Mutex<Vec<super::BarScene>>>,
+    }
+
+    impl NativeHost for ChangingLayoutHost {
+        fn initialize(&mut self, _config: &Config) -> Result<(), crate::error::BarrsError> {
+            Ok(())
+        }
+
+        fn layout_geometry(
+            &self,
+            _config: &Config,
+            _bar_height: f64,
+        ) -> Result<super::LayoutGeometry, crate::error::BarrsError> {
+            let calls = self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(super::LayoutGeometry {
+                bar_width: if calls == 0 { 100.0 } else { 240.0 },
+                safe_left: 0.0,
+                safe_right: 0.0,
+                center_reserved: None,
+            })
+        }
+
+        fn present(&mut self, scene: &super::BarScene) -> Result<(), crate::error::BarrsError> {
+            self.scenes.lock().expect("scenes").push(scene.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn native_renderer_refreshes_layout_before_publishing_scene() {
+        let scenes = Arc::new(Mutex::new(Vec::new()));
+        let host = ChangingLayoutHost {
+            calls: AtomicUsize::new(0),
+            scenes: Arc::clone(&scenes),
+        };
+        let mut renderer = NativeRenderer::new(Box::new(host));
+        renderer.initialize(&Config::default()).expect("initialize");
+
+        renderer
+            .render_item(&test_snapshot("clock", 0, Some("right"), "12:00"))
+            .expect("render");
+
+        let scenes = scenes.lock().expect("scenes");
+        assert_eq!(scenes.last().expect("scene").bar_width, 240.0);
+    }
+
+    #[test]
+    fn native_renderer_republishes_scene_when_polled_layout_changes() {
+        let scenes = Arc::new(Mutex::new(Vec::new()));
+        let host = ChangingLayoutHost {
+            calls: AtomicUsize::new(0),
+            scenes: Arc::clone(&scenes),
+        };
+        let mut renderer = NativeRenderer::new(Box::new(host));
+        renderer.initialize(&Config::default()).expect("initialize");
+
+        let events = renderer.drain_events().expect("drain events");
+
+        assert!(events.is_empty());
+        let scenes = scenes.lock().expect("scenes");
+        assert_eq!(scenes.last().expect("scene").bar_width, 240.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn display_reconfiguration_callback_marks_relevant_changes_pending() {
+        let pending = AtomicBool::new(false);
+
+        unsafe {
+            super::display_reconfiguration_callback(
+                1,
+                super::CGDisplayChangeSummaryFlags::MovedFlag,
+                &pending as *const AtomicBool as *mut std::ffi::c_void,
+            );
+        }
+        assert!(pending.load(Ordering::Acquire));
+
+        pending.store(false, Ordering::Release);
+        unsafe {
+            super::display_reconfiguration_callback(
+                1,
+                super::CGDisplayChangeSummaryFlags::BeginConfigurationFlag,
+                &pending as *const AtomicBool as *mut std::ffi::c_void,
+            );
+        }
+        assert!(!pending.load(Ordering::Acquire));
     }
 
     #[test]
