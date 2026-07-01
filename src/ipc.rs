@@ -1,3 +1,4 @@
+use std::env;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -9,10 +10,8 @@ use crate::cli::TriggerEvent;
 use crate::error::BarrsError;
 use crate::rift::RiftBackendKind;
 
-pub const DEFAULT_SOCKET_PATH: &str = "/tmp/barrs.sock";
-
 pub fn default_socket_path() -> PathBuf {
-    PathBuf::from(DEFAULT_SOCKET_PATH)
+    env::temp_dir().join("barrs.sock")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,7 +93,6 @@ pub enum Request {
     Status,
     DumpState,
     RiftBackend,
-    ValidateConfig { path: PathBuf },
     TriggerItem { payload: EventPayload },
 }
 

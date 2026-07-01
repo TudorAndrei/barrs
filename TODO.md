@@ -6,18 +6,18 @@
 - [x] Assert the known-item click returns `Response::Ok` and executes the Lua handler.
 - [x] Add a negative-path daemon event test if it can remain deterministic.
 - [x] Run `cargo test daemon::tests`.
-- [ ] Commit: `test(daemon): cover ipc-triggered lua handlers`
+- [x] Commit: `test(daemon): cover ipc-triggered lua handlers`
 
 ## Phase 2: Harden daemon IPC and socket lifecycle
-- [ ] Remove `Request::ValidateConfig { path }` from `src/ipc.rs`.
-- [ ] Remove the `Request::ValidateConfig` branch from `Daemon::handle_request` in `src/daemon.rs`.
-- [ ] Confirm `Command::ValidateConfig` in `src/app.rs` still validates locally through `config::load_config`.
-- [ ] Change `default_socket_path()` in `src/ipc.rs` to use a per-user temp directory path.
-- [ ] Update `Config::default` and `load_config` in `src/config.rs` to use `default_socket_path()`.
-- [ ] Update tests that currently assume `/tmp/barrs.sock`.
-- [ ] Change `cleanup_socket` in `src/daemon.rs` so it removes only Unix socket files.
-- [ ] Add socket cleanup tests proving regular files are not deleted.
-- [ ] Run `cargo test ipc::tests config::tests daemon::tests`.
+- [x] Remove `Request::ValidateConfig { path }` from `src/ipc.rs`.
+- [x] Remove the `Request::ValidateConfig` branch from `Daemon::handle_request` in `src/daemon.rs`.
+- [x] Confirm `Command::ValidateConfig` in `src/app.rs` still validates locally through `config::load_config`.
+- [x] Change `default_socket_path()` in `src/ipc.rs` to use a per-user temp directory path.
+- [x] Update `Config::default` and `load_config` in `src/config.rs` to use `default_socket_path()`.
+- [x] Update tests that currently assume `/tmp/barrs.sock`.
+- [x] Change `cleanup_socket` in `src/daemon.rs` so it removes only Unix socket files.
+- [x] Add socket cleanup tests proving regular files are not deleted.
+- [x] Run `cargo test ipc::tests`, `cargo test config::tests`, and `cargo test daemon::tests`.
 - [ ] Commit: `fix(daemon): harden local ipc socket handling`
 
 ## Phase 3: Add a normal CI gate

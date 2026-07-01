@@ -33,7 +33,7 @@ Out of scope: changing release tagging policy, publishing to crates.io, changing
 - Update tests that assert the previous `/tmp/barrs.sock` value so they assert the new helper's behavior without depending on a hard-coded global path.
 - Replace `cleanup_socket` in `src/daemon.rs` with a helper that removes only Unix socket files and refuses to remove regular files, directories, or symlinks.
 - Add tests for the socket cleanup behavior, including a regular-file path that must not be deleted.
-- Run `cargo test ipc::tests config::tests daemon::tests`.
+- Run `cargo test ipc::tests`, `cargo test config::tests`, and `cargo test daemon::tests`.
 **Commit:** `fix(daemon): harden local ipc socket handling`
 
 ### Phase 3: Add a normal CI gate

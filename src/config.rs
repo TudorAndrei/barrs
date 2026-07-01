@@ -5,7 +5,7 @@ use mlua::{Function, Lua, LuaSerdeExt, Value};
 use serde::{Deserialize, Serialize};
 
 use crate::error::BarrsError;
-use crate::ipc::DEFAULT_SOCKET_PATH;
+use crate::ipc::default_socket_path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -19,16 +19,14 @@ pub struct Config {
 
 impl Config {
     pub fn socket_path(&self) -> PathBuf {
-        self.socket_path
-            .clone()
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET_PATH))
+        self.socket_path.clone().unwrap_or_else(default_socket_path)
     }
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            socket_path: Some(PathBuf::from(DEFAULT_SOCKET_PATH)),
+            socket_path: Some(default_socket_path()),
             bar: BarConfig::default(),
             items: Vec::new(),
         }
@@ -163,7 +161,7 @@ pub fn load_config(path: &Path) -> Result<Config, BarrsError> {
     let value: Value = lua.load(&source).set_name(path.to_string_lossy()).eval()?;
     let mut config: Config = lua.from_value(value)?;
     if config.socket_path.is_none() {
-        config.socket_path = Some(PathBuf::from(DEFAULT_SOCKET_PATH));
+        config.socket_path = Some(default_socket_path());
     }
     validate_config(&config)?;
     validate_handlers(&lua, &config)?;
@@ -253,7 +251,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{load_config, BarConfig, BarSection, PluginKind};
+    use super::{BarConfig, BarSection, PluginKind, load_config};
 
     #[test]
     fn loads_lua_config() {

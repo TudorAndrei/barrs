@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -15,7 +16,10 @@ use crate::error::BarrsError;
 use crate::ipc::{EventPayload, Request, Response};
 use crate::plugin::from_item_config;
 use crate::render::{RenderItemSnapshot, Renderer};
-use crate::rift::{RiftApplyResult, RiftBackendKind, RiftSnapshot, RiftSubscription, apply_event, select_backend, subscribe};
+use crate::rift::{
+    RiftApplyResult, RiftBackendKind, RiftSnapshot, RiftSubscription, apply_event, select_backend,
+    subscribe,
+};
 
 const EVENT_TICK_MS: u64 = 16;
 const POLL_TICK_MS: u64 = 250;
@@ -145,12 +149,6 @@ impl<R: Renderer> Daemon<R> {
                     backend: state.backend,
                 })
             }
-            Request::ValidateConfig { path } => {
-                load_config(&path)?;
-                Ok(Response::Ok {
-                    message: format!("validated {}", path.display()),
-                })
-            }
             Request::TriggerItem { payload } => {
                 self.dispatch_event(payload).await?;
                 Ok(Response::Ok {
@@ -167,7 +165,8 @@ impl<R: Renderer> Daemon<R> {
         state.backend = backend.kind();
         state.config = config;
         state.item_states.clear();
-        state.refresh_deadlines = build_refresh_deadlines(&state.config, Instant::now(), state.backend);
+        state.refresh_deadlines =
+            build_refresh_deadlines(&state.config, Instant::now(), state.backend);
         state.rift_subscription = subscribe();
         state.rift_snapshot = None;
         state.rift_dirty = false;
@@ -243,7 +242,9 @@ impl<R: Renderer> Daemon<R> {
         for item_id in due_items {
             if let Some(item) = config.items.iter().find(|item| item.id == item_id) {
                 if let Some(refresh_interval) = item_refresh_interval(item, backend) {
-                    state.refresh_deadlines.insert(item_id, now + refresh_interval);
+                    state
+                        .refresh_deadlines
+                        .insert(item_id, now + refresh_interval);
                 }
             }
         }
@@ -292,12 +293,10 @@ impl<R: Renderer> Daemon<R> {
             if requires_resync {
                 state.rift_snapshot = select_backend().snapshot().ok();
                 state.rift_dirty = state.rift_snapshot.is_some();
-                state.rift_debounce_deadline =
-                    Some(now + Duration::from_millis(RIFT_DEBOUNCE_MS));
+                state.rift_debounce_deadline = Some(now + Duration::from_millis(RIFT_DEBOUNCE_MS));
             } else if changed {
                 state.rift_dirty = true;
-                state.rift_debounce_deadline =
-                    Some(now + Duration::from_millis(RIFT_DEBOUNCE_MS));
+                state.rift_debounce_deadline = Some(now + Duration::from_millis(RIFT_DEBOUNCE_MS));
             }
         }
 
@@ -435,10 +434,20 @@ impl<R: Renderer> Daemon<R> {
 }
 
 fn cleanup_socket(path: &Path) -> Result<(), BarrsError> {
-    if path.exists() {
-        fs::remove_file(path)?;
+    if !path.exists() {
+        return Ok(());
     }
-    Ok(())
+
+    let file_type = fs::symlink_metadata(path)?.file_type();
+    if file_type.is_socket() {
+        fs::remove_file(path)?;
+        return Ok(());
+    }
+
+    Err(BarrsError::InvalidConfig(format!(
+        "refusing to remove non-socket path {}",
+        path.display()
+    )))
 }
 
 fn build_refresh_deadlines(
@@ -460,19 +469,19 @@ fn item_refresh_interval(item: &ItemConfig, backend: RiftBackendKind) -> Option<
     item.interval
         .map(|interval| Duration::from_secs(interval.max(1)))
         .or(match item.plugin.as_ref().map(|plugin| plugin.kind) {
-        Some(PluginKind::Time) => Some(Duration::from_secs(1)),
-        Some(PluginKind::Date) => Some(Duration::from_secs(30 * 60)),
-        Some(PluginKind::Cpu | PluginKind::Gpu) => Some(Duration::from_secs(2)),
-        Some(PluginKind::Battery) => Some(Duration::from_secs(10)),
-        Some(PluginKind::RiftWorkspaces | PluginKind::RiftLayout) => {
-            if backend == RiftBackendKind::Cli {
-                Some(Duration::from_millis(250))
-            } else {
-                None
+            Some(PluginKind::Time) => Some(Duration::from_secs(1)),
+            Some(PluginKind::Date) => Some(Duration::from_secs(30 * 60)),
+            Some(PluginKind::Cpu | PluginKind::Gpu) => Some(Duration::from_secs(2)),
+            Some(PluginKind::Battery) => Some(Duration::from_secs(10)),
+            Some(PluginKind::RiftWorkspaces | PluginKind::RiftLayout) => {
+                if backend == RiftBackendKind::Cli {
+                    Some(Duration::from_millis(250))
+                } else {
+                    None
+                }
             }
-        }
-        _ => None,
-    })
+            _ => None,
+        })
 }
 
 fn snapshot_for_item(
@@ -772,9 +781,43 @@ return {{
 
     #[test]
     fn default_socket_path_is_stable() {
+        let socket_path = default_socket_path();
+
         assert_eq!(
-            default_socket_path(),
-            std::path::PathBuf::from("/tmp/barrs.sock")
+            socket_path.file_name().and_then(|name| name.to_str()),
+            Some("barrs.sock")
+        );
+        assert!(socket_path.starts_with(std::env::temp_dir()));
+    }
+
+    #[test]
+    fn cleanup_socket_removes_socket_files() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("barrs.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).expect("bind socket");
+        drop(listener);
+
+        super::cleanup_socket(&socket_path).expect("cleanup socket");
+
+        assert!(!socket_path.exists());
+    }
+
+    #[test]
+    fn cleanup_socket_refuses_regular_files() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("barrs.sock");
+        fs::write(&socket_path, "not a socket").expect("write regular file");
+
+        let error = super::cleanup_socket(&socket_path).expect_err("regular file should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("refusing to remove non-socket path")
+        );
+        assert_eq!(
+            fs::read_to_string(&socket_path).expect("regular file"),
+            "not a socket"
         );
     }
 
