@@ -7,11 +7,19 @@ use crate::config::{ItemConfig, PluginKind};
 use crate::error::BarrsError;
 use crate::ipc::EventPayload;
 use crate::process::run_command_with_timeout;
-use crate::rift::{RiftSnapshot, RiftWorkspace};
+use crate::rift::RiftSnapshot;
 
 const SYSTEM_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_DATE_FORMAT: &str = "%Y-%m-%d";
 const TIME_FORMAT: &str = "%H:%M";
+const PLACEHOLDER_TEXT: &str = "—";
+
+fn unavailable_snapshot() -> Value {
+    json!({
+        "text": PLACEHOLDER_TEXT,
+        "available": false
+    })
+}
 
 pub trait Plugin: Send + Sync {
     fn snapshot(&self) -> Result<Value, BarrsError>;
@@ -50,10 +58,7 @@ impl Plugin for CpuPlugin {
         if let Some(snapshot) = cpu_snapshot_from_top() {
             return Ok(snapshot);
         }
-        Ok(json!({
-            "text": "12%",
-            "usage_percent": 12.5
-        }))
+        Ok(unavailable_snapshot())
     }
 }
 
@@ -94,11 +99,7 @@ impl Plugin for BatteryPlugin {
         if let Some(snapshot) = battery_snapshot_from_pmset() {
             return Ok(snapshot);
         }
-        Ok(json!({
-            "text": "Battery",
-            "percentage": 87,
-            "charging": false
-        }))
+        Ok(unavailable_snapshot())
     }
 }
 
@@ -110,10 +111,7 @@ impl Plugin for GpuPlugin {
         if let Some(snapshot) = gpu_snapshot_from_ioreg() {
             return Ok(snapshot);
         }
-        Ok(json!({
-            "text": "21%",
-            "utilization_percent": 21
-        }))
+        Ok(unavailable_snapshot())
     }
 }
 
@@ -260,16 +258,9 @@ pub struct RiftWorkspacesPlugin {
 
 impl Plugin for RiftWorkspacesPlugin {
     fn snapshot(&self) -> Result<Value, BarrsError> {
-        let snapshot = self.snapshot.clone().unwrap_or(RiftSnapshot {
-            current_workspace: "1".into(),
-            workspaces: vec![RiftWorkspace {
-                name: "1".into(),
-                is_current: true,
-                has_windows: true,
-            }],
-            layout: "tiling".into(),
-            window_count: 1,
-        });
+        let Some(snapshot) = self.snapshot.clone() else {
+            return Ok(unavailable_snapshot());
+        };
         Ok(json!({
             "text": snapshot.workspaces.iter().map(|workspace| workspace.name.as_str()).collect::<Vec<_>>().join(" "),
             "current_workspace": snapshot.current_workspace,
@@ -289,16 +280,9 @@ pub struct RiftLayoutPlugin {
 
 impl Plugin for RiftLayoutPlugin {
     fn snapshot(&self) -> Result<Value, BarrsError> {
-        let snapshot = self.snapshot.clone().unwrap_or(RiftSnapshot {
-            current_workspace: "1".into(),
-            workspaces: vec![RiftWorkspace {
-                name: "1".into(),
-                is_current: true,
-                has_windows: true,
-            }],
-            layout: "tiling".into(),
-            window_count: 1,
-        });
+        let Some(snapshot) = self.snapshot.clone() else {
+            return Ok(unavailable_snapshot());
+        };
         Ok(json!({
             "text": snapshot.layout,
             "window_count": snapshot.window_count
@@ -310,8 +294,8 @@ impl Plugin for RiftLayoutPlugin {
 mod tests {
     use crate::config::{ItemConfig, ItemHandlers, PluginBinding, PluginKind};
     use crate::plugin::{
-        DatePlugin, Plugin, from_item_config, parse_battery_output, parse_cpu_output,
-        parse_gpu_output,
+        DatePlugin, Plugin, RiftLayoutPlugin, RiftWorkspacesPlugin, from_item_config,
+        parse_battery_output, parse_cpu_output, parse_gpu_output, unavailable_snapshot,
     };
     use crate::rift::{RiftSnapshot, RiftWorkspace};
 
@@ -333,7 +317,33 @@ mod tests {
 
         let plugin = from_item_config(&item, None).expect("plugin");
         let snapshot = plugin.snapshot().expect("snapshot");
-        assert!(snapshot["text"].as_str().expect("text").ends_with('%'));
+        let text = snapshot["text"].as_str().expect("text");
+        assert!(text.ends_with('%') || text == super::PLACEHOLDER_TEXT);
+    }
+
+    #[test]
+    fn cpu_plugin_reports_unavailable_without_data() {
+        let snapshot = unavailable_snapshot();
+        assert_eq!(snapshot["text"], super::PLACEHOLDER_TEXT);
+        assert_eq!(snapshot["available"], false);
+    }
+
+    #[test]
+    fn rift_workspaces_plugin_reports_unavailable_without_snapshot() {
+        let plugin = RiftWorkspacesPlugin { snapshot: None };
+        let snapshot = plugin.snapshot().expect("snapshot");
+        assert_eq!(snapshot["text"], super::PLACEHOLDER_TEXT);
+        assert_eq!(snapshot["available"], false);
+        assert!(snapshot.get("workspaces").is_none());
+    }
+
+    #[test]
+    fn rift_layout_plugin_reports_unavailable_without_snapshot() {
+        let plugin = RiftLayoutPlugin { snapshot: None };
+        let snapshot = plugin.snapshot().expect("snapshot");
+        assert_eq!(snapshot["text"], super::PLACEHOLDER_TEXT);
+        assert_eq!(snapshot["available"], false);
+        assert!(snapshot.get("window_count").is_none());
     }
 
     #[test]

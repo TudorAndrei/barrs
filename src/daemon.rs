@@ -11,7 +11,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tokio::time::{self, Duration, Instant};
 
-use crate::config::{Config, ItemConfig, PluginKind, load_config};
+use crate::config::{Config, ItemConfig, PluginKind, load_config_with_runtime};
 use crate::error::BarrsError;
 use crate::ipc::{EventPayload, Request, Response};
 use crate::plugin::from_item_config;
@@ -24,14 +24,24 @@ use crate::rift::{
 const EVENT_TICK_MS: u64 = 16;
 const POLL_TICK_MS: u64 = 250;
 const RIFT_DEBOUNCE_MS: u64 = 16;
+const REQUEST_READ_TIMEOUT_MS: u64 = 2_000;
 
 pub struct Daemon<R: Renderer> {
     config_path: PathBuf,
     state: Arc<Mutex<DaemonState<R>>>,
+    pending_refresh: Option<tokio::task::JoinHandle<PendingRefresh>>,
+}
+
+struct PendingRefresh {
+    epoch: u64,
+    item_ids: Vec<String>,
+    states: Vec<(String, RenderItemSnapshot)>,
 }
 
 struct DaemonState<R: Renderer> {
     config: Config,
+    config_epoch: u64,
+    lua: Lua,
     backend: RiftBackendKind,
     rift_subscription: Option<RiftSubscription>,
     rift_snapshot: Option<RiftSnapshot>,
@@ -45,11 +55,14 @@ struct DaemonState<R: Renderer> {
 
 impl<R: Renderer> Daemon<R> {
     pub fn new(config_path: PathBuf, config: Config, renderer: R) -> Result<Self, BarrsError> {
+        let (_, lua) = load_config_with_runtime(&config_path)?;
         let backend = select_backend();
         let backend_kind = backend.kind();
         let state = DaemonState {
             refresh_deadlines: build_refresh_deadlines(&config, Instant::now(), backend_kind),
             config,
+            config_epoch: 0,
+            lua,
             backend: backend_kind,
             rift_subscription: subscribe(),
             rift_snapshot: None,
@@ -62,6 +75,7 @@ impl<R: Renderer> Daemon<R> {
         Ok(Self {
             config_path,
             state: Arc::new(Mutex::new(state)),
+            pending_refresh: None,
         })
     }
 
@@ -79,23 +93,46 @@ impl<R: Renderer> Daemon<R> {
 
         loop {
             tokio::select! {
+                result = async { self.pending_refresh.as_mut().expect("pending refresh").await }, if self.pending_refresh.is_some() => {
+                    self.pending_refresh = None;
+                    match result {
+                        Ok(pending) => {
+                            if let Err(error) = self.apply_refresh(pending).await {
+                                eprintln!("barrs: applying refresh failed: {error}");
+                            }
+                        }
+                        Err(error) => eprintln!("barrs: refresh task failed: {error}"),
+                    }
+                }
                 accept_result = listener.accept() => {
-                    let (stream, _) = accept_result?;
-                    let should_stop = self.handle_connection(stream).await?;
-                    if should_stop {
-                        break;
+                    match accept_result {
+                        Ok((stream, _)) => match self.handle_connection(stream).await {
+                            Ok(true) => break,
+                            Ok(false) => {}
+                            Err(error) => eprintln!("barrs: connection failed: {error}"),
+                        },
+                        Err(error) => eprintln!("barrs: accept failed: {error}"),
                     }
                 }
                 _ = event_tick.tick() => {
-                    self.process_renderer_events().await?;
-                    self.process_rift_events().await?;
+                    if let Err(error) = self.process_renderer_events().await {
+                        eprintln!("barrs: renderer event processing failed: {error}");
+                    }
+                    if let Err(error) = self.process_rift_events().await {
+                        eprintln!("barrs: rift event processing failed: {error}");
+                    }
                 }
                 _ = poll_tick.tick() => {
-                    self.refresh_due_items().await?;
+                    if let Err(error) = self.refresh_due_items().await {
+                        eprintln!("barrs: item refresh failed: {error}");
+                    }
                 }
             }
         }
 
+        if let Some(pending) = self.pending_refresh.take() {
+            pending.abort();
+        }
         cleanup_socket(&socket_path)?;
         Ok(())
     }
@@ -103,12 +140,36 @@ impl<R: Renderer> Daemon<R> {
     async fn handle_connection(&mut self, stream: UnixStream) -> Result<bool, BarrsError> {
         let mut line = String::new();
         let mut reader = BufReader::new(stream);
-        let bytes = reader.read_line(&mut line).await?;
+        let read = tokio::time::timeout(
+            Duration::from_millis(REQUEST_READ_TIMEOUT_MS),
+            reader.read_line(&mut line),
+        )
+        .await;
+        let bytes = match read {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(error)) => {
+                eprintln!("barrs: failed to read request: {error}");
+                return Ok(false);
+            }
+            Err(_) => {
+                eprintln!("barrs: request read timed out");
+                return Ok(false);
+            }
+        };
         if bytes == 0 {
             return Ok(false);
         }
-        let request: Request = serde_json::from_str(line.trim())?;
-        let response = self.handle_request(request).await?;
+        let response = match serde_json::from_str::<Request>(line.trim()) {
+            Ok(request) => match self.handle_request(request).await {
+                Ok(response) => response,
+                Err(error) => Response::Error {
+                    message: error.to_string(),
+                },
+            },
+            Err(error) => Response::Error {
+                message: format!("invalid request: {error}"),
+            },
+        };
         let stop = matches!(response, Response::Ok { ref message } if message == "stopping");
         let mut stream = reader.into_inner();
         let response_json = serde_json::to_string(&response)?;
@@ -159,11 +220,13 @@ impl<R: Renderer> Daemon<R> {
     }
 
     async fn reload(&mut self) -> Result<(), BarrsError> {
-        let config = load_config(&self.config_path)?;
+        let (config, lua) = load_config_with_runtime(&self.config_path)?;
         let backend = select_backend();
         let mut state = self.state.lock().await;
+        state.config_epoch = state.config_epoch.wrapping_add(1);
         state.backend = backend.kind();
         state.config = config;
+        state.lua = lua;
         state.item_states.clear();
         state.refresh_deadlines =
             build_refresh_deadlines(&state.config, Instant::now(), state.backend);
@@ -207,10 +270,14 @@ impl<R: Renderer> Daemon<R> {
     }
 
     async fn refresh_due_items(&mut self) -> Result<(), BarrsError> {
-        let due_items = {
+        if self.pending_refresh.is_some() {
+            return Ok(());
+        }
+
+        let (due_items, config, epoch, cached_rift_snapshot) = {
             let state = self.state.lock().await;
             let now = Instant::now();
-            state
+            let due = state
                 .refresh_deadlines
                 .iter()
                 .filter_map(|(item_id, deadline)| {
@@ -220,26 +287,61 @@ impl<R: Renderer> Daemon<R> {
                         None
                     }
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (
+                due,
+                state.config.clone(),
+                state.config_epoch,
+                state.rift_snapshot.clone(),
+            )
         };
 
         if due_items.is_empty() {
             return Ok(());
         }
 
-        self.refresh_selected_items(&due_items).await?;
+        let needs_rift = refresh_needs_rift(&config, &due_items);
+        self.pending_refresh = Some(tokio::task::spawn_blocking(move || {
+            let rift_snapshot = if needs_rift {
+                select_backend().snapshot().ok().or(cached_rift_snapshot)
+            } else {
+                cached_rift_snapshot
+            };
+            let mut states = Vec::new();
+            for (order, item) in config
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| due_items.iter().any(|item_id| item_id == &item.id))
+            {
+                match snapshot_for_item(item, order, rift_snapshot.as_ref()) {
+                    Ok(snapshot) => states.push((item.id.clone(), snapshot)),
+                    Err(error) => eprintln!("barrs: snapshot for {} failed: {error}", item.id),
+                }
+            }
+            PendingRefresh {
+                epoch,
+                item_ids: due_items,
+                states,
+            }
+        }));
 
-        let config = {
-            let state = self.state.lock().await;
-            state.config.clone()
-        };
-        let backend = {
-            let state = self.state.lock().await;
-            state.backend
-        };
-        let now = Instant::now();
+        Ok(())
+    }
+
+    async fn apply_refresh(&mut self, pending: PendingRefresh) -> Result<(), BarrsError> {
         let mut state = self.state.lock().await;
-        for item_id in due_items {
+        if state.config_epoch != pending.epoch {
+            return Ok(());
+        }
+        for (item_id, snapshot) in pending.states {
+            state.renderer.render_item(&snapshot)?;
+            state.item_states.insert(item_id, snapshot);
+        }
+        let now = Instant::now();
+        let backend = state.backend;
+        let config = state.config.clone();
+        for item_id in pending.item_ids {
             if let Some(item) = config.items.iter().find(|item| item.id == item_id) {
                 if let Some(refresh_interval) = item_refresh_interval(item, backend) {
                     state
@@ -314,12 +416,7 @@ impl<R: Renderer> Daemon<R> {
                 .config
                 .items
                 .iter()
-                .filter(|item| {
-                    matches!(
-                        item.plugin.as_ref().map(|plugin| plugin.kind),
-                        Some(PluginKind::RiftWorkspaces | PluginKind::RiftLayout)
-                    )
-                })
+                .filter(|item| is_rift_item(item))
                 .map(|item| item.id.clone())
                 .collect::<Vec<_>>()
         };
@@ -352,12 +449,6 @@ impl<R: Renderer> Daemon<R> {
         Ok(())
     }
 
-    async fn refresh_selected_items(&mut self, item_ids: &[String]) -> Result<(), BarrsError> {
-        let rift_snapshot = select_backend().snapshot().ok();
-        self.refresh_selected_items_with_rift(item_ids, rift_snapshot.as_ref())
-            .await
-    }
-
     async fn refresh_selected_items_with_rift(
         &mut self,
         item_ids: &[String],
@@ -388,9 +479,9 @@ impl<R: Renderer> Daemon<R> {
     }
 
     async fn dispatch_event(&mut self, payload: EventPayload) -> Result<(), BarrsError> {
-        let config = {
+        let (config, cached_rift_snapshot) = {
             let state = self.state.lock().await;
-            state.config.clone()
+            (state.config.clone(), state.rift_snapshot.clone())
         };
         let item = config
             .items
@@ -404,7 +495,10 @@ impl<R: Renderer> Daemon<R> {
             .position(|candidate| candidate.id == item.id)
             .unwrap_or(0);
 
-        invoke_lua_handler(&self.config_path, &item, &payload)?;
+        {
+            let state = self.state.lock().await;
+            invoke_lua_handler(&state.lua, &item, &payload)?;
+        }
 
         {
             let mut state = self.state.lock().await;
@@ -417,9 +511,12 @@ impl<R: Renderer> Daemon<R> {
                 | crate::ipc::EventKind::HoverLeave
                 | crate::ipc::EventKind::HoverUpdate
         ) {
-            if let Some(mut plugin) =
-                from_item_config(&item, select_backend().snapshot().ok().as_ref())
-            {
+            let rift_snapshot = if is_rift_item(&item) {
+                select_backend().snapshot().ok().or(cached_rift_snapshot)
+            } else {
+                cached_rift_snapshot
+            };
+            if let Some(mut plugin) = from_item_config(&item, rift_snapshot.as_ref()) {
                 plugin.handle_event(&payload)?;
                 let snapshot =
                     RenderItemSnapshot::from_item_config(&item, order, plugin.snapshot()?);
@@ -484,6 +581,21 @@ fn item_refresh_interval(item: &ItemConfig, backend: RiftBackendKind) -> Option<
         })
 }
 
+fn is_rift_item(item: &ItemConfig) -> bool {
+    matches!(
+        item.plugin.as_ref().map(|plugin| plugin.kind),
+        Some(PluginKind::RiftWorkspaces | PluginKind::RiftLayout)
+    )
+}
+
+fn refresh_needs_rift(config: &Config, due_items: &[String]) -> bool {
+    config
+        .items
+        .iter()
+        .filter(|item| due_items.iter().any(|item_id| item_id == &item.id))
+        .any(is_rift_item)
+}
+
 fn snapshot_for_item(
     item: &ItemConfig,
     order: usize,
@@ -508,7 +620,7 @@ fn snapshot_for_item(
 }
 
 fn invoke_lua_handler(
-    config_path: &Path,
+    lua: &Lua,
     item: &ItemConfig,
     payload: &EventPayload,
 ) -> Result<(), BarrsError> {
@@ -524,11 +636,6 @@ fn invoke_lua_handler(
         return Ok(());
     };
 
-    let source = fs::read_to_string(config_path)?;
-    let lua = Lua::new();
-    lua.load(&source)
-        .set_name(config_path.to_string_lossy())
-        .exec()?;
     let globals = lua.globals();
     let func: mlua::Function = globals
         .get(handler_name.as_str())
@@ -548,9 +655,11 @@ mod tests {
     };
 
     use tempfile::tempdir;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
     use tokio::task::JoinHandle;
 
-    use crate::config::load_config;
+    use crate::config::{Config, ItemConfig, ItemHandlers, PluginBinding, PluginKind, load_config};
     use crate::ipc::{Request, Response, default_socket_path, send_request};
     use crate::render::{NativeRenderer, NoopRenderer, Renderer};
 
@@ -677,6 +786,38 @@ return {{
         .expect("write config");
     }
 
+    fn write_counter_config(path: &Path, socket_path: &Path, marker_path: &Path) {
+        fs::write(
+            path,
+            format!(
+                r#"
+counter = 0
+
+function handle_click(ctx)
+  counter = counter + 1
+  local file = io.open([=[{}]=], "w")
+  file:write(tostring(counter))
+  file:close()
+end
+
+return {{
+  socket_path = "{}",
+  items = {{
+    {{
+      id = "clock",
+      label = "clock",
+      handlers = {{ click = "handle_click" }}
+    }}
+  }}
+}}
+"#,
+                marker_path.display(),
+                socket_path.display()
+            ),
+        )
+        .expect("write config");
+    }
+
     async fn wait_for_socket(socket_path: &Path) {
         for _ in 0..20 {
             if socket_path.exists() {
@@ -748,6 +889,267 @@ return {{
             fs::read_to_string(&marker_path).expect("marker"),
             "clock:click"
         );
+
+        let _ = send_request(&socket_path, &Request::Stop)
+            .await
+            .expect("stop");
+        task.await.expect("join").expect("daemon result");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn daemon_survives_malformed_requests() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("barrs.sock");
+        let config_path = dir.path().join("barrs.lua");
+        write_config(&config_path, &socket_path);
+
+        let config = load_config(&config_path).expect("config");
+        let daemon =
+            Daemon::new(config_path.clone(), config, NoopRenderer::default()).expect("daemon");
+        let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
+
+        wait_for_socket(&socket_path).await;
+
+        let mut stream = UnixStream::connect(&socket_path).await.expect("connect");
+        stream
+            .write_all(b"not json\n")
+            .await
+            .expect("write request");
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.expect("read response");
+        assert!(matches!(
+            serde_json::from_str::<Response>(line.trim()).expect("response"),
+            Response::Error { .. }
+        ));
+
+        let pong = send_request(&socket_path, &Request::Ping)
+            .await
+            .expect("ping");
+        assert!(matches!(pong, Response::Pong));
+
+        let _ = send_request(&socket_path, &Request::Stop)
+            .await
+            .expect("stop");
+        task.await.expect("join").expect("daemon result");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn daemon_survives_unknown_item_trigger_over_ipc() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("barrs.sock");
+        let config_path = dir.path().join("barrs.lua");
+        let marker_path = dir.path().join("trigger.txt");
+        write_trigger_config(&config_path, &socket_path, &marker_path);
+
+        let config = load_config(&config_path).expect("config");
+        let daemon =
+            Daemon::new(config_path.clone(), config, NoopRenderer::default()).expect("daemon");
+        let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
+
+        wait_for_socket(&socket_path).await;
+
+        let response = send_request(
+            &socket_path,
+            &Request::TriggerItem {
+                payload: crate::ipc::EventPayload::from_trigger(
+                    "missing".into(),
+                    crate::cli::TriggerEvent::Click,
+                ),
+            },
+        )
+        .await
+        .expect("trigger");
+        let Response::Error { message } = response else {
+            panic!("expected error response");
+        };
+        assert!(message.contains("unknown item missing"));
+
+        let pong = send_request(&socket_path, &Request::Ping)
+            .await
+            .expect("ping");
+        assert!(matches!(pong, Response::Pong));
+
+        let _ = send_request(&socket_path, &Request::Stop)
+            .await
+            .expect("stop");
+        task.await.expect("join").expect("daemon result");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn daemon_survives_reload_with_broken_config() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("barrs.sock");
+        let config_path = dir.path().join("barrs.lua");
+        write_config(&config_path, &socket_path);
+
+        let config = load_config(&config_path).expect("config");
+        let daemon =
+            Daemon::new(config_path.clone(), config, NoopRenderer::default()).expect("daemon");
+        let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
+
+        wait_for_socket(&socket_path).await;
+        fs::write(&config_path, "this is not lua").expect("write broken config");
+
+        let response = send_request(&socket_path, &Request::Reload)
+            .await
+            .expect("reload");
+        assert!(matches!(response, Response::Error { .. }));
+
+        let pong = send_request(&socket_path, &Request::Ping)
+            .await
+            .expect("ping");
+        assert!(matches!(pong, Response::Pong));
+
+        let _ = send_request(&socket_path, &Request::Stop)
+            .await
+            .expect("stop");
+        task.await.expect("join").expect("daemon result");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn daemon_survives_silent_client() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("barrs.sock");
+        let config_path = dir.path().join("barrs.lua");
+        write_config(&config_path, &socket_path);
+
+        let config = load_config(&config_path).expect("config");
+        let daemon =
+            Daemon::new(config_path.clone(), config, NoopRenderer::default()).expect("daemon");
+        let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
+
+        wait_for_socket(&socket_path).await;
+        let _silent = UnixStream::connect(&socket_path).await.expect("connect");
+        tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+
+        let pong = send_request(&socket_path, &Request::Ping)
+            .await
+            .expect("ping");
+        assert!(matches!(pong, Response::Pong));
+
+        let _ = send_request(&socket_path, &Request::Stop)
+            .await
+            .expect("stop");
+        task.await.expect("join").expect("daemon result");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lua_handler_state_persists_between_events() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("barrs.sock");
+        let config_path = dir.path().join("barrs.lua");
+        let marker_path = dir.path().join("counter.txt");
+        write_counter_config(&config_path, &socket_path, &marker_path);
+
+        let config = load_config(&config_path).expect("config");
+        let daemon =
+            Daemon::new(config_path.clone(), config, NoopRenderer::default()).expect("daemon");
+        let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
+
+        wait_for_socket(&socket_path).await;
+        for _ in 0..2 {
+            let response = send_request(
+                &socket_path,
+                &Request::TriggerItem {
+                    payload: crate::ipc::EventPayload::from_trigger(
+                        "clock".into(),
+                        crate::cli::TriggerEvent::Click,
+                    ),
+                },
+            )
+            .await
+            .expect("trigger");
+            assert!(matches!(response, Response::Ok { .. }));
+        }
+        assert_eq!(fs::read_to_string(&marker_path).expect("marker"), "2");
+
+        let _ = send_request(&socket_path, &Request::Stop)
+            .await
+            .expect("stop");
+        task.await.expect("join").expect("daemon result");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lua_handlers_do_not_reread_config_from_disk() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("barrs.sock");
+        let config_path = dir.path().join("barrs.lua");
+        let marker_path = dir.path().join("counter.txt");
+        write_counter_config(&config_path, &socket_path, &marker_path);
+
+        let config = load_config(&config_path).expect("config");
+        let daemon =
+            Daemon::new(config_path.clone(), config, NoopRenderer::default()).expect("daemon");
+        let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
+
+        wait_for_socket(&socket_path).await;
+        fs::write(&config_path, "boom").expect("write broken config");
+        let response = send_request(
+            &socket_path,
+            &Request::TriggerItem {
+                payload: crate::ipc::EventPayload::from_trigger(
+                    "clock".into(),
+                    crate::cli::TriggerEvent::Click,
+                ),
+            },
+        )
+        .await
+        .expect("trigger");
+        assert!(matches!(response, Response::Ok { .. }));
+        assert_eq!(fs::read_to_string(&marker_path).expect("marker"), "1");
+
+        let _ = send_request(&socket_path, &Request::Stop)
+            .await
+            .expect("stop");
+        task.await.expect("join").expect("daemon result");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reload_resets_lua_handler_state() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("barrs.sock");
+        let config_path = dir.path().join("barrs.lua");
+        let marker_path = dir.path().join("counter.txt");
+        write_counter_config(&config_path, &socket_path, &marker_path);
+
+        let config = load_config(&config_path).expect("config");
+        let daemon =
+            Daemon::new(config_path.clone(), config, NoopRenderer::default()).expect("daemon");
+        let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
+
+        wait_for_socket(&socket_path).await;
+        for _ in 0..2 {
+            let _ = send_request(
+                &socket_path,
+                &Request::TriggerItem {
+                    payload: crate::ipc::EventPayload::from_trigger(
+                        "clock".into(),
+                        crate::cli::TriggerEvent::Click,
+                    ),
+                },
+            )
+            .await
+            .expect("trigger");
+        }
+        assert_eq!(fs::read_to_string(&marker_path).expect("marker"), "2");
+
+        let response = send_request(&socket_path, &Request::Reload)
+            .await
+            .expect("reload");
+        assert!(matches!(response, Response::Ok { .. }));
+        let _ = send_request(
+            &socket_path,
+            &Request::TriggerItem {
+                payload: crate::ipc::EventPayload::from_trigger(
+                    "clock".into(),
+                    crate::cli::TriggerEvent::Click,
+                ),
+            },
+        )
+        .await
+        .expect("trigger");
+        assert_eq!(fs::read_to_string(&marker_path).expect("marker"), "1");
 
         let _ = send_request(&socket_path, &Request::Stop)
             .await
@@ -998,6 +1400,52 @@ return {{
             ),
             Some(std::time::Duration::from_secs(30 * 60))
         );
+    }
+
+    #[test]
+    fn identifies_rift_items() {
+        let make_item = |kind| ItemConfig {
+            id: "item".into(),
+            label: None,
+            icon: None,
+            placement: None,
+            interval: None,
+            plugin: Some(PluginBinding { kind, format: None }),
+            hover: None,
+            handlers: ItemHandlers::default(),
+        };
+
+        assert!(!super::is_rift_item(&make_item(PluginKind::Time)));
+        assert!(!super::is_rift_item(&make_item(PluginKind::Cpu)));
+        assert!(!super::is_rift_item(&make_item(PluginKind::Date)));
+        assert!(super::is_rift_item(&make_item(PluginKind::RiftWorkspaces)));
+        assert!(super::is_rift_item(&make_item(PluginKind::RiftLayout)));
+    }
+
+    #[test]
+    fn refresh_needs_rift_only_for_due_rift_items() {
+        let make_item = |id: &str, kind| ItemConfig {
+            id: id.into(),
+            label: None,
+            icon: None,
+            placement: None,
+            interval: None,
+            plugin: Some(PluginBinding { kind, format: None }),
+            hover: None,
+            handlers: ItemHandlers::default(),
+        };
+        let config = Config {
+            socket_path: None,
+            bar: Default::default(),
+            items: vec![
+                make_item("time", PluginKind::Time),
+                make_item("workspaces", PluginKind::RiftWorkspaces),
+            ],
+        };
+
+        assert!(!super::refresh_needs_rift(&config, &[]));
+        assert!(!super::refresh_needs_rift(&config, &["time".into()]));
+        assert!(super::refresh_needs_rift(&config, &["workspaces".into()]));
     }
 
     #[test]

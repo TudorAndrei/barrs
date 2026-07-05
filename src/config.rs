@@ -155,7 +155,7 @@ pub struct ItemHandlers {
     pub hover_update: Option<String>,
 }
 
-pub fn load_config(path: &Path) -> Result<Config, BarrsError> {
+pub fn load_config_with_runtime(path: &Path) -> Result<(Config, Lua), BarrsError> {
     let source = fs::read_to_string(path)?;
     let lua = Lua::new();
     let value: Value = lua.load(&source).set_name(path.to_string_lossy()).eval()?;
@@ -165,7 +165,11 @@ pub fn load_config(path: &Path) -> Result<Config, BarrsError> {
     }
     validate_config(&config)?;
     validate_handlers(&lua, &config)?;
-    Ok(config)
+    Ok((config, lua))
+}
+
+pub fn load_config(path: &Path) -> Result<Config, BarrsError> {
+    load_config_with_runtime(path).map(|(config, _)| config)
 }
 
 pub fn validate_config(config: &Config) -> Result<(), BarrsError> {
