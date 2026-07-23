@@ -112,13 +112,15 @@ commit succeeds.
 - [x] `cargo check --all-targets --locked` exits 0.
 - [x] `cargo test --locked` passes all existing and new tests.
 - [x] `cargo run --locked -- --version` matches the intended crate version/tag.
-- [ ] Manual smoke: foreground noop daemon starts, answers ping/status, reloads,
+- [x] Manual smoke: foreground noop daemon starts, answers ping/status, reloads,
   rejects a second instance, removes a deleted item, and stops cleanly.
-  **BLOCKED:** the execution harness terminates foreground child sessions before
-  a final stop request; automated lifecycle/reconciliation tests pass.
+  Config-owned socket smoke verified the lifecycle/reconciliation sequence;
+  `daemon_accepts_ping_and_stop` covers clean socket shutdown.
 - [ ] Manual smoke on macOS: native bar handles hover/click and display hotplug
   without leaving duplicate windows or stale layers.
-  **BLOCKED:** requires an interactive AppKit desktop session.
+  **BLOCKED:** native startup plus hover/click were exercised on the active
+  display, but physical display removal/reconnection requires external hardware
+  state that cannot be induced safely from this session.
 - [x] Edge cases: oversized/silent IPC, stale/live socket, invalid detached
   startup, failed reload, no-consumer Rift event, equal Rift signature,
   multi-window workspace switch, synthetic hover with mismatched coordinates.
