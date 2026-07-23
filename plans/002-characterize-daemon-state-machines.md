@@ -83,12 +83,12 @@ state fields and renderer counts exactly, not “at least” counts.
 
 ## Done criteria
 
-- [ ] Scheduler transition tests are deterministic.
-- [ ] No test sleeps for the current 1.25-second scheduler window.
-- [ ] Known bug behavior is not enshrined as expected behavior.
-- [ ] `mise run check` exits 0.
-- [ ] Only scoped files changed.
-- [ ] `plans/README.md` row is updated.
+- [x] Scheduler transition tests are deterministic.
+- [x] No test sleeps for the current 1.25-second scheduler window.
+- [x] Known bug behavior is not enshrined as expected behavior.
+- [x] `mise run check` exits 0.
+- [x] Only scoped files changed.
+- [x] `plans/README.md` row is updated.
 
 ## STOP conditions
 

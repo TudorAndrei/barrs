@@ -270,24 +270,10 @@ impl<R: Renderer> Daemon<R> {
     }
 
     async fn refresh_due_items(&mut self) -> Result<(), BarrsError> {
-        if self.pending_refresh.is_some() {
-            return Ok(());
-        }
-
         let (due_items, config, epoch, cached_rift_snapshot) = {
             let state = self.state.lock().await;
             let now = Instant::now();
-            let due = state
-                .refresh_deadlines
-                .iter()
-                .filter_map(|(item_id, deadline)| {
-                    if *deadline <= now {
-                        Some(item_id.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>();
+            let due = due_item_ids(&state.refresh_deadlines, now);
             (
                 due,
                 state.config.clone(),
@@ -296,7 +282,7 @@ impl<R: Renderer> Daemon<R> {
             )
         };
 
-        if due_items.is_empty() {
+        if !can_start_refresh(self.pending_refresh.is_some(), &due_items) {
             return Ok(());
         }
 
@@ -331,7 +317,7 @@ impl<R: Renderer> Daemon<R> {
 
     async fn apply_refresh(&mut self, pending: PendingRefresh) -> Result<(), BarrsError> {
         let mut state = self.state.lock().await;
-        if state.config_epoch != pending.epoch {
+        if !refresh_epoch_matches(state.config_epoch, pending.epoch) {
             return Ok(());
         }
         for (item_id, snapshot) in pending.states {
@@ -341,15 +327,13 @@ impl<R: Renderer> Daemon<R> {
         let now = Instant::now();
         let backend = state.backend;
         let config = state.config.clone();
-        for item_id in pending.item_ids {
-            if let Some(item) = config.items.iter().find(|item| item.id == item_id)
-                && let Some(refresh_interval) = item_refresh_interval(item, backend)
-            {
-                state
-                    .refresh_deadlines
-                    .insert(item_id, now + refresh_interval);
-            }
-        }
+        advance_refresh_deadlines(
+            &mut state.refresh_deadlines,
+            &config,
+            backend,
+            &pending.item_ids,
+            now,
+        );
 
         Ok(())
     }
@@ -394,19 +378,19 @@ impl<R: Renderer> Daemon<R> {
             }
             if requires_resync {
                 state.rift_snapshot = select_backend().snapshot().ok();
-                state.rift_dirty = state.rift_snapshot.is_some();
-                state.rift_debounce_deadline = Some(now + Duration::from_millis(RIFT_DEBOUNCE_MS));
-            } else if changed {
-                state.rift_dirty = true;
-                state.rift_debounce_deadline = Some(now + Duration::from_millis(RIFT_DEBOUNCE_MS));
+            }
+            if let Some(transition) = rift_debounce_transition(
+                changed,
+                requires_resync,
+                state.rift_snapshot.is_some(),
+                now,
+            ) {
+                state.rift_dirty = transition.dirty;
+                state.rift_debounce_deadline = transition.deadline;
             }
         }
 
-        let should_refresh = state.rift_dirty
-            && state
-                .rift_debounce_deadline
-                .map(|deadline| deadline <= now)
-                .unwrap_or(false);
+        let should_refresh = rift_debounce_due(state.rift_dirty, state.rift_debounce_deadline, now);
         if !should_refresh {
             return Ok(());
         }
@@ -435,7 +419,7 @@ impl<R: Renderer> Daemon<R> {
             let state = self.state.lock().await;
             state.last_rift_signature
         };
-        if last_signature == Some(next_signature) {
+        if !rift_signature_changed(last_signature, next_signature) {
             return Ok(());
         }
 
@@ -560,6 +544,70 @@ fn build_refresh_deadlines(
                 .map(|refresh_interval| (item.id.clone(), now + refresh_interval))
         })
         .collect()
+}
+
+fn due_item_ids(deadlines: &HashMap<String, Instant>, now: Instant) -> Vec<String> {
+    deadlines
+        .iter()
+        .filter(|(_, deadline)| **deadline <= now)
+        .map(|(item_id, _)| item_id.clone())
+        .collect()
+}
+
+fn can_start_refresh(refresh_is_pending: bool, due_items: &[String]) -> bool {
+    !refresh_is_pending && !due_items.is_empty()
+}
+
+fn refresh_epoch_matches(current_epoch: u64, pending_epoch: u64) -> bool {
+    current_epoch == pending_epoch
+}
+
+fn advance_refresh_deadlines(
+    deadlines: &mut HashMap<String, Instant>,
+    config: &Config,
+    backend: RiftBackendKind,
+    item_ids: &[String],
+    now: Instant,
+) {
+    for item_id in item_ids {
+        if let Some(item) = config.items.iter().find(|item| item.id == *item_id)
+            && let Some(refresh_interval) = item_refresh_interval(item, backend)
+        {
+            deadlines.insert(item_id.clone(), now + refresh_interval);
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RiftDebounceTransition {
+    dirty: bool,
+    deadline: Option<Instant>,
+}
+
+fn rift_debounce_transition(
+    changed: bool,
+    requires_resync: bool,
+    snapshot_available: bool,
+    now: Instant,
+) -> Option<RiftDebounceTransition> {
+    if requires_resync {
+        return Some(RiftDebounceTransition {
+            dirty: snapshot_available,
+            deadline: Some(now + Duration::from_millis(RIFT_DEBOUNCE_MS)),
+        });
+    }
+    changed.then(|| RiftDebounceTransition {
+        dirty: true,
+        deadline: Some(now + Duration::from_millis(RIFT_DEBOUNCE_MS)),
+    })
+}
+
+fn rift_debounce_due(dirty: bool, deadline: Option<Instant>, now: Instant) -> bool {
+    dirty && deadline.is_some_and(|deadline| deadline <= now)
+}
+
+fn rift_signature_changed(last_signature: Option<u64>, next_signature: u64) -> bool {
+    last_signature != Some(next_signature)
 }
 
 fn item_refresh_interval(item: &ItemConfig, backend: RiftBackendKind) -> Option<Duration> {
@@ -1223,36 +1271,80 @@ return {{
         );
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn daemon_refreshes_scheduled_items() {
-        let dir = tempdir().expect("tempdir");
-        let socket_path = dir.path().join("barrs.sock");
-        let config_path = dir.path().join("barrs.lua");
-        write_refreshing_config(&config_path, &socket_path);
+    #[test]
+    fn scheduler_transitions_are_deterministic() {
+        let now = tokio::time::Instant::now();
+        let mut deadlines = std::collections::HashMap::from([
+            ("due".into(), now - std::time::Duration::from_millis(1)),
+            ("later".into(), now + std::time::Duration::from_secs(1)),
+        ]);
+        let mut due = super::due_item_ids(&deadlines, now);
+        due.sort();
+        assert_eq!(due, vec!["due"]);
+        assert!(super::can_start_refresh(false, &due));
+        assert!(!super::can_start_refresh(true, &due));
+        assert!(!super::can_start_refresh(false, &[]));
 
-        let renders = Arc::new(AtomicUsize::new(0));
-        let renderer = CountingRenderer {
-            renders: Arc::clone(&renders),
+        assert!(super::refresh_epoch_matches(4, 4));
+        assert!(!super::refresh_epoch_matches(4, 3));
+
+        let config = Config {
+            socket_path: None,
+            bar: Default::default(),
+            items: vec![
+                scheduled_item("due", PluginKind::Time),
+                scheduled_item("failed", PluginKind::Time),
+            ],
         };
+        // A partial snapshot failure still advances every attempted item's deadline,
+        // avoiding a tight retry loop. `states` would contain only `due` here.
+        super::advance_refresh_deadlines(
+            &mut deadlines,
+            &config,
+            crate::rift::RiftBackendKind::Mach,
+            &["due".into(), "failed".into()],
+            now,
+        );
+        assert_eq!(deadlines["due"], now + std::time::Duration::from_secs(1));
+        assert_eq!(deadlines["failed"], now + std::time::Duration::from_secs(1));
+    }
 
-        let config = load_config(&config_path).expect("config");
-        let daemon = Daemon::new(config_path.clone(), config, renderer).expect("daemon");
-        let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
+    #[test]
+    fn rift_debounce_transitions_are_deterministic() {
+        let now = tokio::time::Instant::now();
+        let changed = super::rift_debounce_transition(true, false, true, now)
+            .expect("changed event schedules refresh");
+        assert!(changed.dirty);
+        assert_eq!(
+            changed.deadline,
+            Some(now + std::time::Duration::from_millis(super::RIFT_DEBOUNCE_MS))
+        );
+        assert!(!super::rift_debounce_due(true, changed.deadline, now));
+        assert!(super::rift_debounce_due(
+            true,
+            changed.deadline,
+            now + std::time::Duration::from_millis(super::RIFT_DEBOUNCE_MS)
+        ));
 
-        for _ in 0..20 {
-            if socket_path.exists() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
+        let resync = super::rift_debounce_transition(false, true, true, now)
+            .expect("resync schedules refresh when a snapshot was recovered");
+        assert!(resync.dirty);
+        assert!(super::rift_debounce_transition(false, false, true, now).is_none());
 
-        tokio::time::sleep(std::time::Duration::from_millis(1250)).await;
-        let _ = send_request(&socket_path, &Request::Stop)
-            .await
-            .expect("stop");
-        task.await.expect("join").expect("daemon result");
+        assert!(super::rift_signature_changed(Some(1), 2));
+        assert!(!super::rift_signature_changed(Some(2), 2));
 
-        assert!(renders.load(Ordering::SeqCst) >= 2);
+        // Plan 009 owns terminal cleanup when there are no Rift consumers or a
+        // recovered snapshot has the same signature. Do not treat this state as
+        // a successful publication in this characterization test.
+        let no_snapshot = super::rift_debounce_transition(false, true, false, now)
+            .expect("resync still records its debounce deadline");
+        assert!(!no_snapshot.dirty);
+        assert!(!super::rift_debounce_due(
+            no_snapshot.dirty,
+            no_snapshot.deadline,
+            now + std::time::Duration::from_millis(super::RIFT_DEBOUNCE_MS)
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1446,6 +1538,19 @@ return {{
         assert!(!super::refresh_needs_rift(&config, &[]));
         assert!(!super::refresh_needs_rift(&config, &["time".into()]));
         assert!(super::refresh_needs_rift(&config, &["workspaces".into()]));
+    }
+
+    fn scheduled_item(id: &str, kind: PluginKind) -> ItemConfig {
+        ItemConfig {
+            id: id.into(),
+            label: None,
+            icon: None,
+            placement: None,
+            interval: None,
+            plugin: Some(PluginBinding { kind, format: None }),
+            hover: None,
+            handlers: ItemHandlers::default(),
+        }
     }
 
     #[test]

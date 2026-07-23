@@ -7,13 +7,13 @@ commit succeeds.
 
 - [x] Complete `plans/001-enforce-rust-quality-gates.md`.
 - [x] `mise run check` passes on the pinned toolchain.
-- [ ] Commit: `chore(ci): enforce rust quality gates` (pending this phase's commit)
+- [x] Commit: `chore(ci): enforce rust quality gates`
 
 ## Phase 2: Daemon transition coverage
 
-- [ ] Complete `plans/002-characterize-daemon-state-machines.md`.
-- [ ] Scheduler/Rift tests are deterministic and do not codify known bugs.
-- [ ] Commit: `test(daemon): characterize refresh and rift state transitions`
+- [x] Complete `plans/002-characterize-daemon-state-machines.md`.
+- [x] Scheduler/Rift tests are deterministic and do not codify known bugs.
+- [ ] Commit: `test(daemon): characterize refresh and rift state transitions` (pending this phase's commit)
 
 ## Phase 3: CLI error status
 

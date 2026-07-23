@@ -13,7 +13,7 @@ is in [TODO.md](./TODO.md).
 | Plan | Title | Covers | Priority | Effort | Depends on | Status |
 |---|---|---|---|---|---|---|
 | 001 | Enforce Rust quality gates | Finding 11 | P1 | S | — | DONE |
-| 002 | Characterize daemon state machines | Finding 14 | P1 | M | 001 | TODO |
+| 002 | Characterize daemon state machines | Finding 14 | P1 | M | 001 | DONE |
 | 003 | Propagate daemon response errors | Finding 3 | P1 | S | 001 | TODO |
 | 004 | Harden IPC framing and concurrency | Findings 2, 6 | P1 | M | 001, 002 | TODO |
 | 005 | Make startup single-instance and ready | Findings 1, 7 | P1 | M | 003, 004 | TODO |
