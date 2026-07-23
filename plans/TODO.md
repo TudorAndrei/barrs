@@ -37,13 +37,13 @@ commit succeeds.
 
 - [x] Complete `plans/006-reconcile-renderer-items-on-reload.md`.
 - [x] Removed/renamed/failed-reload tests pass.
-- [ ] Commit: `fix(render): reconcile items during reload` (pending this phase's commit)
+- [x] Commit: `fix(render): reconcile items during reload`
 
 ## Phase 7: AppKit main-thread ownership
 
-- [ ] Complete `plans/007-confine-appkit-renderer-to-main-thread.md`.
-- [ ] Unsafe AppKit `Send`/`Sync` implementations are absent.
-- [ ] Commit: `refactor(render): confine appkit host to main thread`
+- [x] Complete `plans/007-confine-appkit-renderer-to-main-thread.md`.
+- [x] Unsafe AppKit `Send`/`Sync` implementations are absent.
+- [ ] Commit: `refactor(render): confine appkit host to main thread` (pending this phase's commit)
 
 ## Phase 8: Single config evaluation
 

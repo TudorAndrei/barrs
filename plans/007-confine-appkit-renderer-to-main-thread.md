@@ -85,12 +85,12 @@ renderer must not be promised as cross-thread safe.
 
 ## Done criteria
 
-- [ ] AppKit ownership has no unsafe `Send`/`Sync`.
-- [ ] Stateful UI operations remain on the main thread.
-- [ ] Current-thread daemon behavior remains unchanged.
-- [ ] `mise run check` exits 0.
-- [ ] `git status --short` lists only scoped files and the plan status update.
-- [ ] `plans/README.md` row is updated.
+- [x] AppKit ownership has no unsafe `Send`/`Sync`.
+- [x] Stateful UI operations remain on the main thread.
+- [x] Current-thread daemon behavior remains unchanged.
+- [x] `mise run check` exits 0.
+- [x] `git status --short` lists only scoped files and the plan status update.
+- [x] `plans/README.md` row is updated.
 
 ## STOP conditions
 

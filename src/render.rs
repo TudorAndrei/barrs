@@ -62,7 +62,11 @@ pub enum RendererKind {
     Noop,
 }
 
-pub trait Renderer: Send + Sync {
+/// A renderer is owned by the current application thread.
+///
+/// Native renderers retain AppKit objects and therefore intentionally do not
+/// promise `Send` or `Sync`.
+pub trait Renderer {
     fn initialize(&mut self, _config: &Config) -> Result<(), BarrsError>;
     fn render_item(&mut self, snapshot: &RenderItemSnapshot) -> Result<(), BarrsError>;
     fn reconcile(
@@ -598,7 +602,7 @@ impl NativeSurfaceState {
     }
 }
 
-trait NativeHost: Send + Sync {
+trait NativeHost {
     fn initialize(&mut self, config: &Config) -> Result<(), BarrsError>;
     fn layout_geometry(
         &self,
@@ -686,12 +690,6 @@ struct AppKitHost {
 }
 
 #[cfg(target_os = "macos")]
-unsafe impl Send for AppKitHost {}
-
-#[cfg(target_os = "macos")]
-unsafe impl Sync for AppKitHost {}
-
-#[cfg(target_os = "macos")]
 impl NativeHost for AppKitHost {
     fn initialize(&mut self, config: &Config) -> Result<(), BarrsError> {
         let mtm = main_thread_marker()?;
@@ -748,6 +746,9 @@ impl NativeHost for AppKitHost {
 #[cfg(target_os = "macos")]
 impl Drop for AppKitHost {
     fn drop(&mut self) {
+        // A registered callback can only exist after `initialize` acquired a
+        // MainThreadMarker. AppKitHost is !Send, so its owner cannot move away
+        // from that thread before this cleanup runs.
         if !self.display_callback_registered {
             return;
         }
