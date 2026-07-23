@@ -10,6 +10,8 @@ pub enum BarrsError {
     Json(#[from] serde_json::Error),
     #[error("daemon is not running")]
     DaemonUnavailable,
+    #[error("daemon rejected request: {0}")]
+    DaemonRejected(String),
     #[error("invalid config: {0}")]
     InvalidConfig(String),
     #[error("unsupported operation: {0}")]

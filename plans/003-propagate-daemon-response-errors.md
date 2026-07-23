@@ -73,12 +73,12 @@ noop/socket-backed process test if it can remain deterministic and AppKit-free.
 
 ## Done criteria
 
-- [ ] A daemon error reaches `main` as `Err`.
-- [ ] Successful commands retain their output and zero status.
-- [ ] New unit/process tests pass.
-- [ ] `mise run check` exits 0.
-- [ ] `git status --short` lists only scoped files and the plan status update.
-- [ ] `plans/README.md` row is updated.
+- [x] A daemon error reaches `main` as `Err`.
+- [x] Successful commands retain their output and zero status.
+- [x] New unit/process tests pass.
+- [x] `mise run check` exits 0.
+- [x] `git status --short` lists only scoped files and the plan status update.
+- [x] `plans/README.md` row is updated.
 
 ## STOP conditions
 

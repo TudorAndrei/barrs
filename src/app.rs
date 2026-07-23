@@ -34,7 +34,7 @@ pub async fn run(cli: Cli) -> Result<(), BarrsError> {
             })?;
             print_response(Response::Ok {
                 message: format!("started barrs with {}", config_path.display()),
-            });
+            })?;
             Ok(())
         }
         Command::Run(args) => {
@@ -49,20 +49,16 @@ pub async fn run(cli: Cli) -> Result<(), BarrsError> {
             daemon.run().await
         }
         Command::Stop(args) => {
-            print_response(send_request(&socket_or_default(args.socket), &Request::Stop).await?);
-            Ok(())
+            print_response(send_request(&socket_or_default(args.socket), &Request::Stop).await?)
         }
         Command::Reload(args) => {
-            print_response(send_request(&socket_or_default(args.socket), &Request::Reload).await?);
-            Ok(())
+            print_response(send_request(&socket_or_default(args.socket), &Request::Reload).await?)
         }
         Command::Status(args) => {
-            print_response(send_request(&socket_or_default(args.socket), &Request::Status).await?);
-            Ok(())
+            print_response(send_request(&socket_or_default(args.socket), &Request::Status).await?)
         }
         Command::Ping(args) => {
-            print_response(send_request(&socket_or_default(args.socket), &Request::Ping).await?);
-            Ok(())
+            print_response(send_request(&socket_or_default(args.socket), &Request::Ping).await?)
         }
         Command::ValidateConfig(args) => {
             let config_path = resolve_config_path(args.config);
@@ -74,26 +70,22 @@ pub async fn run(cli: Cli) -> Result<(), BarrsError> {
                     config.items.len()
                 ),
             };
-            print_response(response);
-            Ok(())
+            print_response(response)
         }
-        Command::DumpState(args) => {
-            print_response(
-                send_request(&socket_or_default(args.socket), &Request::DumpState).await?,
-            );
-            Ok(())
-        }
+        Command::DumpState(args) => print_response(
+            send_request(&socket_or_default(args.socket), &Request::DumpState).await?,
+        ),
         Command::Rift(args) => match args.command {
             RiftCommand::Backend(socket) => {
                 if socket.socket.is_some() {
                     print_response(
                         send_request(&socket_or_default(socket.socket), &Request::RiftBackend)
                             .await?,
-                    );
+                    )?;
                 } else {
                     print_response(Response::RiftBackend {
                         backend: rift::select_backend().kind(),
-                    });
+                    })?;
                 }
                 Ok(())
             }
@@ -107,8 +99,7 @@ pub async fn run(cli: Cli) -> Result<(), BarrsError> {
                         &Request::TriggerItem { payload },
                     )
                     .await?,
-                );
-                Ok(())
+                )
             }
         },
     }
@@ -187,7 +178,7 @@ fn apply_socket_override(
     config
 }
 
-fn print_response(response: Response) {
+fn print_response(response: Response) -> Result<(), BarrsError> {
     match response {
         Response::Pong => println!("pong"),
         Response::Ok { message } => println!("{message}"),
@@ -213,6 +204,52 @@ fn print_response(response: Response) {
                 serde_json::to_string(&backend).unwrap_or_else(|_| "\"unknown\"".into())
             )
         }
-        Response::Error { message } => eprintln!("{message}"),
+        Response::Error { message } => return Err(BarrsError::DaemonRejected(message)),
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::error::BarrsError;
+    use crate::ipc::Response;
+    use crate::rift::RiftBackendKind;
+
+    use super::print_response;
+
+    #[test]
+    fn successful_responses_are_accepted() {
+        let responses = [
+            Response::Pong,
+            Response::Ok {
+                message: "ok".into(),
+            },
+            Response::Status {
+                running: true,
+                items: 1,
+                backend: RiftBackendKind::Cli,
+                config_path: PathBuf::from("config.lua"),
+            },
+            Response::State(serde_json::json!({"item": "value"})),
+            Response::RiftBackend {
+                backend: RiftBackendKind::Mach,
+            },
+        ];
+
+        for response in responses {
+            assert!(print_response(response).is_ok());
+        }
+    }
+
+    #[test]
+    fn daemon_error_is_propagated() {
+        let error = print_response(Response::Error {
+            message: "reload failed".into(),
+        })
+        .expect_err("daemon error must fail the command");
+
+        assert!(matches!(error, BarrsError::DaemonRejected(message) if message == "reload failed"));
     }
 }
