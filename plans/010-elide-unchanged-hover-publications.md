@@ -78,12 +78,12 @@ delivery.
 
 ## Done criteria
 
-- [ ] Same-target updates do not republish a scene.
-- [ ] Empty command lists do not force AppKit updates.
-- [ ] Hover enter/leave and Lua update handlers still work.
-- [ ] Full gate passes.
-- [ ] `git status --short` lists only scoped files and the plan status update.
-- [ ] `plans/README.md` row is updated.
+- [x] Same-target updates do not republish a scene.
+- [x] Empty command lists do not force AppKit updates.
+- [x] Hover enter/leave and Lua update handlers still work.
+- [x] Full gate passes.
+- [x] `git status --short` lists only scoped files and the plan status update.
+- [x] `plans/README.md` row is updated.
 
 ## STOP conditions
 

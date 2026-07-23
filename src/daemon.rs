@@ -937,6 +937,33 @@ return {{
         .expect("write config");
     }
 
+    fn write_hover_update_config(path: &Path, socket_path: &Path, marker_path: &Path) {
+        fs::write(
+            path,
+            format!(
+                r#"
+updates = 0
+function record_hover_update(ctx)
+  updates = updates + 1
+  local marker = io.open([=[{}]=], "w")
+  marker:write(tostring(updates))
+  marker:close()
+end
+
+return {{
+  socket_path = "{}",
+  items = {{
+    {{ id = "clock", label = "clock", hover = {{ tooltip = "Clock" }}, handlers = {{ hover_update = "record_hover_update" }} }}
+  }}
+}}
+"#,
+                marker_path.display(),
+                socket_path.display()
+            ),
+        )
+        .expect("write config");
+    }
+
     fn write_item_config(path: &Path, socket_path: &Path, item_ids: &[&str]) {
         let items = item_ids
             .iter()
@@ -1908,6 +1935,40 @@ return {{
             .expect("hover update");
 
         assert_eq!(renders.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn daemon_delivers_unchanged_hover_updates_to_lua_handlers() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("barrs.sock");
+        let config_path = dir.path().join("barrs.lua");
+        let marker_path = dir.path().join("hover-updates.txt");
+        write_hover_update_config(&config_path, &socket_path, &marker_path);
+
+        let config = load_config(&config_path).expect("config");
+        let mut daemon =
+            Daemon::new(config_path.clone(), config, NativeRenderer::default()).expect("daemon");
+        daemon.refresh_all_items().await.expect("initial render");
+        let event = crate::ipc::EventPayload {
+            item_id: "clock".into(),
+            event: crate::ipc::EventKind::HoverUpdate,
+            timestamp_ms: 0,
+            mouse: crate::ipc::MouseState {
+                x: 10,
+                y: 10,
+                button: None,
+                scroll_delta: None,
+            },
+            modifiers: crate::ipc::Modifiers::default(),
+        };
+
+        daemon
+            .dispatch_event(event.clone())
+            .await
+            .expect("first update");
+        daemon.dispatch_event(event).await.expect("same update");
+
+        assert_eq!(fs::read_to_string(&marker_path).expect("marker"), "2");
     }
 
     #[test]

@@ -55,13 +55,13 @@ commit succeeds.
 
 - [x] Complete `plans/009-clear-rift-debounce-terminal-state.md`.
 - [x] No-consumer/equal-signature regression tests pass.
-- [ ] Commit: `fix(rift): finish no-op debounce cycles` (pending this phase's commit)
+- [x] Commit: `fix(rift): finish no-op debounce cycles`
 
 ## Phase 10: Hover publication
 
-- [ ] Complete `plans/010-elide-unchanged-hover-publications.md`.
-- [ ] Same-target updates preserve handlers without AppKit publication.
-- [ ] Commit: `perf(render): skip unchanged hover publications`
+- [x] Complete `plans/010-elide-unchanged-hover-publications.md`.
+- [x] Same-target updates preserve handlers without AppKit publication.
+- [ ] Commit: `perf(render): skip unchanged hover publications` (pending this phase's commit)
 
 ## Phase 11: Rift counts
 

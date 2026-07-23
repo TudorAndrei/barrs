@@ -552,7 +552,8 @@ impl NativeSurfaceState {
         }
     }
 
-    fn handle_event(&mut self, event: &EventPayload) {
+    fn handle_event(&mut self, event: &EventPayload) -> bool {
+        let previous = self.active_hover_item.clone();
         match event.event {
             EventKind::HoverEnter | EventKind::HoverUpdate => {
                 self.active_hover_item = self.item_at(event.mouse.x as f64, event.mouse.y as f64);
@@ -564,6 +565,7 @@ impl NativeSurfaceState {
             }
             _ => {}
         }
+        self.active_hover_item != previous
     }
 
     fn item_at(&self, x: f64, y: f64) -> Option<String> {
@@ -1036,6 +1038,9 @@ impl AppKitHost {
     }
 
     fn apply_commands(&mut self, commands: &[HostCommand]) -> Result<(), BarrsError> {
+        if commands.is_empty() {
+            return Ok(());
+        }
         for command in commands {
             match command {
                 HostCommand::ConfigureWindow(frame) => self.configure_window(frame)?,
@@ -1822,8 +1827,10 @@ impl Renderer for NativeRenderer {
     }
 
     fn handle_event(&mut self, event: &EventPayload) -> Result<(), BarrsError> {
-        self.state.handle_event(event);
-        self.publish_scene()
+        if self.state.handle_event(event) {
+            self.publish_scene()?;
+        }
+        Ok(())
     }
 }
 
@@ -2217,6 +2224,21 @@ mod tests {
                 })
                 .collect(),
             ..Config::default()
+        }
+    }
+
+    struct PresentationCountingHost {
+        presentations: Arc<AtomicUsize>,
+    }
+
+    impl NativeHost for PresentationCountingHost {
+        fn initialize(&mut self, _config: &Config) -> Result<(), crate::error::BarrsError> {
+            Ok(())
+        }
+
+        fn present(&mut self, _scene: &super::BarScene) -> Result<(), crate::error::BarrsError> {
+            self.presentations.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
     }
 
@@ -3083,6 +3105,38 @@ mod tests {
         assert_eq!(hover.item_id, "time");
         assert_eq!(hover.tooltip.as_deref(), Some("Current time"));
         assert_eq!(hover.detail.as_deref(), Some("Thursday"));
+    }
+
+    #[test]
+    fn unchanged_hover_updates_do_not_publish_a_new_scene() {
+        let presentations = Arc::new(AtomicUsize::new(0));
+        let mut renderer = NativeRenderer::new(Box::new(PresentationCountingHost {
+            presentations: Arc::clone(&presentations),
+        }));
+        renderer
+            .initialize(&config_with_item_ids(&["clock"]))
+            .expect("initialize");
+        renderer
+            .render_item(&test_snapshot("clock", 0, Some("left"), "12:00"))
+            .expect("render");
+        let hover_event = EventPayload {
+            item_id: "clock".into(),
+            event: EventKind::HoverUpdate,
+            timestamp_ms: 0,
+            mouse: MouseState {
+                x: 10,
+                y: 10,
+                button: None,
+                scroll_delta: None,
+            },
+            modifiers: Modifiers::default(),
+        };
+
+        renderer.handle_event(&hover_event).expect("first hover");
+        let after_first_hover = presentations.load(Ordering::SeqCst);
+        renderer.handle_event(&hover_event).expect("same hover");
+
+        assert_eq!(presentations.load(Ordering::SeqCst), after_first_hover);
     }
 
     #[test]
