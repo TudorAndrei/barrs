@@ -125,12 +125,13 @@ bar = {
   spacing = 0,
   background = "#000000",
   notch_width = 200,
+  notch_padding = 8,
   notch_offset = 0,
   notch_display_height = 0,
 }
 ```
 
-`notch_width` is the reserved horizontal gap used on notched built-in displays. `notch_offset` shifts the native top bar frame vertically on built-in displays, and `notch_display_height` overrides the bar window height when set to a value greater than `0`.
+`notch_width` is the physical horizontal notch width used on notched built-in displays. `notch_padding` adds clearance on each side of that width (default: `8`), preventing icons from sitting flush against or clipping beneath the notch. `notch_offset` shifts the native top bar frame vertically on built-in displays, and `notch_display_height` overrides the bar window height when set to a value greater than `0`.
 
 Built-in `time`, `date`, `cpu`, `gpu`, and `battery` items now refresh automatically with sane defaults. Set `interval` on an item to override that default. Example:
 

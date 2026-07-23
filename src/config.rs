@@ -41,6 +41,8 @@ pub struct BarConfig {
     pub background: Option<String>,
     #[serde(default = "default_notch_width")]
     pub notch_width: u32,
+    #[serde(default = "default_notch_padding")]
+    pub notch_padding: u32,
     #[serde(default)]
     pub notch_offset: u32,
     #[serde(default)]
@@ -55,12 +57,17 @@ fn default_notch_width() -> u32 {
     200
 }
 
+fn default_notch_padding() -> u32 {
+    8
+}
+
 impl Default for BarConfig {
     fn default() -> Self {
         Self {
             spacing: default_spacing(),
             background: None,
             notch_width: default_notch_width(),
+            notch_padding: default_notch_padding(),
             notch_offset: 0,
             notch_display_height: 0,
         }
@@ -289,6 +296,7 @@ return {
         assert_eq!(config.items.len(), 1);
         assert_eq!(config.bar.spacing, 6);
         assert_eq!(config.bar.notch_width, 200);
+        assert_eq!(config.bar.notch_padding, 8);
         assert_eq!(config.bar.notch_offset, 0);
         assert_eq!(config.bar.notch_display_height, 0);
         assert_eq!(
@@ -303,6 +311,7 @@ return {
 
         assert_eq!(bar.spacing, 6);
         assert_eq!(bar.notch_width, 200);
+        assert_eq!(bar.notch_padding, 8);
         assert_eq!(bar.notch_offset, 0);
         assert_eq!(bar.notch_display_height, 0);
     }
@@ -317,6 +326,7 @@ return {
 return {
   bar = {
     notch_width = 240,
+    notch_padding = 12,
     notch_offset = 3,
     notch_display_height = 32,
   },
@@ -333,6 +343,7 @@ return {
 
         let config = load_config(&path).expect("notch config should load");
         assert_eq!(config.bar.notch_width, 240);
+        assert_eq!(config.bar.notch_padding, 12);
         assert_eq!(config.bar.notch_offset, 3);
         assert_eq!(config.bar.notch_display_height, 32);
     }

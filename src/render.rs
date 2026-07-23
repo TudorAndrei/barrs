@@ -1559,6 +1559,7 @@ fn screen_layout_geometry(config: &Config, screen: ScreenGeometry) -> LayoutGeom
         center_reserved: center_reserved_range(
             screen.full.width,
             config.bar.notch_width,
+            config.bar.notch_padding,
             screen.builtin && screen.notch_height > 0.0,
         ),
     }
@@ -1567,12 +1568,13 @@ fn screen_layout_geometry(config: &Config, screen: ScreenGeometry) -> LayoutGeom
 fn center_reserved_range(
     bar_width: f64,
     notch_width: u32,
+    notch_padding: u32,
     notch_active: bool,
 ) -> Option<CenterReservedRange> {
     if !notch_active || bar_width <= 0.0 || notch_width == 0 {
         return None;
     }
-    let width = (notch_width as f64).min(bar_width);
+    let width = (notch_width as f64 + 2.0 * notch_padding as f64).min(bar_width);
     let center = bar_width / 2.0;
     Some(CenterReservedRange {
         start: center - (width / 2.0),
@@ -2488,13 +2490,13 @@ mod tests {
 
     #[test]
     fn center_reserved_range_uses_configured_notch_width() {
-        assert_eq!(super::center_reserved_range(300.0, 0, true), None);
-        assert_eq!(super::center_reserved_range(300.0, 80, false), None);
+        assert_eq!(super::center_reserved_range(300.0, 0, 8, true), None);
+        assert_eq!(super::center_reserved_range(300.0, 80, 8, false), None);
         assert_eq!(
-            super::center_reserved_range(300.0, 80, true),
+            super::center_reserved_range(300.0, 80, 8, true),
             Some(super::CenterReservedRange {
-                start: 110.0,
-                end: 190.0,
+                start: 102.0,
+                end: 198.0,
             })
         );
     }
@@ -2531,8 +2533,8 @@ mod tests {
         assert_eq!(
             layout.center_reserved,
             Some(super::CenterReservedRange {
-                start: 110.0,
-                end: 190.0,
+                start: 102.0,
+                end: 198.0,
             })
         );
 

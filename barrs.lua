@@ -7,6 +7,7 @@ return {
 		spacing = 0,
 		background = "#000000",
 		notch_width = 200,
+		notch_padding = 8,
 		notch_offset = 0,
 		notch_display_height = 0,
 	},
