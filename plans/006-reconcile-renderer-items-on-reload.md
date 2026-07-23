@@ -87,13 +87,13 @@ remove, rename, retained update, removed hover, and failed renderer initialize.
 
 ## Done criteria
 
-- [ ] Removed and renamed items disappear after reload.
-- [ ] Removed hovered items dismiss their hover panel.
-- [ ] Renderer initialization occurs once per reload.
-- [ ] Failed reload retains the previous working state.
-- [ ] Full quality gate passes.
-- [ ] `git status --short` lists only scoped files and the plan status update.
-- [ ] `plans/README.md` row is updated.
+- [x] Removed and renamed items disappear after reload.
+- [x] Removed hovered items dismiss their hover panel.
+- [x] Renderer initialization occurs once per reload.
+- [x] Failed reload retains the previous working state.
+- [x] Full quality gate passes.
+- [x] `git status --short` lists only scoped files and the plan status update.
+- [x] `plans/README.md` row is updated.
 
 ## STOP conditions
 

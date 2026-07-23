@@ -31,13 +31,13 @@ commit succeeds.
 
 - [x] Complete `plans/005-make-startup-single-instance-and-ready.md`.
 - [x] Concurrent/live/invalid/ready startup cases pass.
-- [ ] Commit: `fix(daemon): enforce single-instance ready startup` (pending this phase's commit)
+- [x] Commit: `fix(daemon): enforce single-instance ready startup`
 
 ## Phase 6: Reload reconciliation
 
-- [ ] Complete `plans/006-reconcile-renderer-items-on-reload.md`.
-- [ ] Removed/renamed/failed-reload tests pass.
-- [ ] Commit: `fix(render): reconcile items during reload`
+- [x] Complete `plans/006-reconcile-renderer-items-on-reload.md`.
+- [x] Removed/renamed/failed-reload tests pass.
+- [ ] Commit: `fix(render): reconcile items during reload` (pending this phase's commit)
 
 ## Phase 7: AppKit main-thread ownership
 

@@ -65,6 +65,17 @@ pub enum RendererKind {
 pub trait Renderer: Send + Sync {
     fn initialize(&mut self, _config: &Config) -> Result<(), BarrsError>;
     fn render_item(&mut self, snapshot: &RenderItemSnapshot) -> Result<(), BarrsError>;
+    fn reconcile(
+        &mut self,
+        config: &Config,
+        snapshots: &[RenderItemSnapshot],
+    ) -> Result<(), BarrsError> {
+        self.initialize(config)?;
+        for snapshot in snapshots {
+            self.render_item(snapshot)?;
+        }
+        Ok(())
+    }
     fn drain_events(&mut self) -> Result<Vec<EventPayload>, BarrsError> {
         Ok(Vec::new())
     }
@@ -80,6 +91,14 @@ impl<T: Renderer + ?Sized> Renderer for Box<T> {
 
     fn render_item(&mut self, snapshot: &RenderItemSnapshot) -> Result<(), BarrsError> {
         (**self).render_item(snapshot)
+    }
+
+    fn reconcile(
+        &mut self,
+        config: &Config,
+        snapshots: &[RenderItemSnapshot],
+    ) -> Result<(), BarrsError> {
+        (**self).reconcile(config, snapshots)
     }
 
     fn drain_events(&mut self) -> Result<Vec<EventPayload>, BarrsError> {
@@ -365,6 +384,28 @@ impl Default for NativeSurfaceState {
 }
 
 impl NativeSurfaceState {
+    fn retain_configured_items(&mut self, config: &Config) -> bool {
+        let previous_len = self.items.len();
+        self.items.retain(|item| {
+            config
+                .items
+                .iter()
+                .any(|configured| configured.id == item.snapshot.id)
+        });
+        if self
+            .active_hover_item
+            .as_ref()
+            .is_some_and(|item_id| !self.items.iter().any(|item| &item.snapshot.id == item_id))
+        {
+            self.active_hover_item = None;
+        }
+        let changed = self.items.len() != previous_len;
+        if changed {
+            self.relayout();
+        }
+        changed
+    }
+
     fn update_snapshot(&mut self, snapshot: RenderItemSnapshot, bar_height: f64) {
         self.bar_height = bar_height;
         self.items.retain(|item| item.snapshot.id != snapshot.id);
@@ -1715,12 +1756,16 @@ impl Default for NativeRenderer {
 
 impl Renderer for NativeRenderer {
     fn initialize(&mut self, config: &Config) -> Result<(), BarrsError> {
+        let removed_items = self.state.retain_configured_items(config);
         self.state.bar_height = BAR_HEIGHT;
         self.state.item_spacing = config.bar.spacing as f64;
         self.config = Some(config.clone());
         self.host.initialize(config)?;
         let layout = self.host.layout_geometry(config, self.state.bar_height)?;
         self.state.set_layout_geometry(layout);
+        if removed_items {
+            self.publish_scene()?;
+        }
         Ok(())
     }
 
@@ -1728,6 +1773,42 @@ impl Renderer for NativeRenderer {
         self.state
             .update_snapshot(snapshot.clone(), self.state.bar_height.max(1.0));
         self.publish_scene()
+    }
+
+    fn reconcile(
+        &mut self,
+        config: &Config,
+        snapshots: &[RenderItemSnapshot],
+    ) -> Result<(), BarrsError> {
+        self.host.initialize(config)?;
+        let layout = self.host.layout_geometry(config, BAR_HEIGHT)?;
+        let active_hover_item = self.state.active_hover_item.clone();
+        let mut next_state = NativeSurfaceState {
+            bar_height: BAR_HEIGHT,
+            item_spacing: config.bar.spacing as f64,
+            layout,
+            active_hover_item,
+            items: Vec::new(),
+        };
+        for snapshot in snapshots {
+            next_state.update_snapshot(snapshot.clone(), BAR_HEIGHT);
+        }
+        if next_state
+            .active_hover_item
+            .as_ref()
+            .is_some_and(|item_id| {
+                !next_state
+                    .items
+                    .iter()
+                    .any(|item| &item.snapshot.id == item_id)
+            })
+        {
+            next_state.active_hover_item = None;
+        }
+        self.host.present(&next_state.scene())?;
+        self.config = Some(config.clone());
+        self.state = next_state;
+        Ok(())
     }
 
     fn drain_events(&mut self) -> Result<Vec<EventPayload>, BarrsError> {
@@ -1769,6 +1850,20 @@ impl Renderer for NoopRenderer {
     fn render_item(&mut self, snapshot: &RenderItemSnapshot) -> Result<(), BarrsError> {
         self.rendered_items += 1;
         self.snapshots.insert(snapshot.id.clone(), snapshot.clone());
+        Ok(())
+    }
+
+    fn reconcile(
+        &mut self,
+        _config: &Config,
+        snapshots: &[RenderItemSnapshot],
+    ) -> Result<(), BarrsError> {
+        self.rendered_items += snapshots.len();
+        self.snapshots = snapshots
+            .iter()
+            .cloned()
+            .map(|snapshot| (snapshot.id.clone(), snapshot))
+            .collect();
         Ok(())
     }
 }
@@ -2102,6 +2197,25 @@ mod tests {
                 hover: false,
             },
             data: json!({ "text": text }),
+        }
+    }
+
+    fn config_with_item_ids(ids: &[&str]) -> Config {
+        Config {
+            items: ids
+                .iter()
+                .map(|id| ItemConfig {
+                    id: (*id).into(),
+                    label: Some((*id).into()),
+                    icon: None,
+                    placement: Some("left".into()),
+                    interval: None,
+                    plugin: None,
+                    hover: None,
+                    handlers: ItemHandlers::default(),
+                })
+                .collect(),
+            ..Config::default()
         }
     }
 
@@ -2827,6 +2941,55 @@ mod tests {
             .frame
             .x;
         assert_eq!(updated_gpu_x, gpu_x);
+    }
+
+    #[test]
+    fn reconcile_replaces_removed_items_and_clears_removed_hover() {
+        let mut renderer = NativeRenderer::new(Box::new(MockNativeHost::default()));
+        let initial = config_with_item_ids(&["a", "b"]);
+        renderer
+            .reconcile(
+                &initial,
+                &[
+                    test_snapshot("a", 0, Some("left"), "A"),
+                    test_snapshot("b", 1, Some("left"), "B"),
+                ],
+            )
+            .expect("initial reconcile");
+        renderer.state.active_hover_item = Some("a".into());
+
+        let replacement = config_with_item_ids(&["b", "c"]);
+        renderer
+            .reconcile(
+                &replacement,
+                &[
+                    test_snapshot("b", 0, Some("left"), "B2"),
+                    test_snapshot("c", 1, Some("left"), "C"),
+                ],
+            )
+            .expect("replacement reconcile");
+
+        assert_eq!(
+            renderer
+                .surface_state()
+                .items
+                .iter()
+                .map(|item| item.snapshot.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b", "c"]
+        );
+        assert_eq!(renderer.surface_state().active_hover_item, None);
+        assert_eq!(
+            renderer
+                .surface_state()
+                .items
+                .iter()
+                .find(|item| item.snapshot.id == "b")
+                .expect("retained item")
+                .snapshot
+                .text,
+            "B2"
+        );
     }
 
     #[test]

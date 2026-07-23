@@ -240,12 +240,16 @@ impl<R: Renderer> Daemon<R> {
     async fn reload(&mut self) -> Result<(), BarrsError> {
         let (config, lua) = load_config_with_runtime(&self.config_path)?;
         let backend = select_backend();
+        let backend_kind = backend.kind();
+        let rift_snapshot = backend.snapshot().ok();
+        let rift_signature = rift_snapshot.as_ref().map(RiftSnapshot::signature);
+        let next_states = snapshots_for_config(&config, rift_snapshot.as_ref())?;
         let mut state = self.state.lock().await;
+        state.renderer.reconcile(&config, &next_states)?;
         state.config_epoch = state.config_epoch.wrapping_add(1);
-        state.backend = backend.kind();
+        state.backend = backend_kind;
         state.config = config;
         state.lua = lua;
-        state.item_states.clear();
         state.refresh_deadlines =
             build_refresh_deadlines(&state.config, Instant::now(), state.backend);
         state.rift_subscription = subscribe();
@@ -253,33 +257,30 @@ impl<R: Renderer> Daemon<R> {
         state.rift_dirty = false;
         state.rift_debounce_deadline = None;
         state.last_rift_signature = None;
-        let config_clone = state.config.clone();
-        state.renderer.initialize(&config_clone)?;
-        drop(state);
-        self.refresh_all_items().await
+        state.item_states = next_states
+            .into_iter()
+            .map(|snapshot| (snapshot.id.clone(), snapshot))
+            .collect();
+        state.rift_snapshot = rift_snapshot;
+        state.last_rift_signature = rift_signature;
+        Ok(())
     }
 
     async fn refresh_all_items(&mut self) -> Result<(), BarrsError> {
         let config = {
-            let mut state = self.state.lock().await;
-            let config = state.config.clone();
-            state.renderer.initialize(&config)?;
-            config
+            let state = self.state.lock().await;
+            state.config.clone()
         };
         let rift_snapshot = select_backend().snapshot().ok();
         let rift_signature = rift_snapshot.as_ref().map(RiftSnapshot::signature);
-        let mut next_states = HashMap::new();
-
-        for (order, item) in config.items.iter().enumerate() {
-            let snapshot = snapshot_for_item(item, order, rift_snapshot.as_ref())?;
-            next_states.insert(item.id.clone(), snapshot);
-        }
+        let next_states = snapshots_for_config(&config, rift_snapshot.as_ref())?;
 
         let mut state = self.state.lock().await;
-        for (item_id, snapshot) in next_states {
-            state.renderer.render_item(&snapshot)?;
-            state.item_states.insert(item_id, snapshot);
-        }
+        state.renderer.reconcile(&config, &next_states)?;
+        state.item_states = next_states
+            .into_iter()
+            .map(|snapshot| (snapshot.id.clone(), snapshot))
+            .collect();
         state.rift_snapshot = rift_snapshot;
         state.rift_dirty = false;
         state.rift_debounce_deadline = None;
@@ -706,6 +707,18 @@ fn refresh_needs_rift(config: &Config, due_items: &[String]) -> bool {
         .any(is_rift_item)
 }
 
+fn snapshots_for_config(
+    config: &Config,
+    rift_snapshot: Option<&RiftSnapshot>,
+) -> Result<Vec<RenderItemSnapshot>, BarrsError> {
+    config
+        .items
+        .iter()
+        .enumerate()
+        .map(|(order, item)| snapshot_for_item(item, order, rift_snapshot))
+        .collect()
+}
+
 fn snapshot_for_item(
     item: &ItemConfig,
     order: usize,
@@ -761,6 +774,7 @@ mod tests {
     use std::path::Path;
     use std::sync::{
         Arc,
+        atomic::AtomicBool,
         atomic::{AtomicUsize, Ordering},
     };
 
@@ -777,6 +791,33 @@ mod tests {
 
     struct CountingRenderer {
         renders: Arc<AtomicUsize>,
+    }
+
+    struct FailingReconcileRenderer {
+        fail_initialization: Arc<AtomicBool>,
+        initializations: Arc<AtomicUsize>,
+    }
+
+    impl Renderer for FailingReconcileRenderer {
+        fn initialize(
+            &mut self,
+            _config: &crate::config::Config,
+        ) -> Result<(), crate::error::BarrsError> {
+            if self.fail_initialization.load(Ordering::SeqCst) {
+                return Err(crate::error::BarrsError::Unsupported(
+                    "renderer initialization failed".into(),
+                ));
+            }
+            self.initializations.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn render_item(
+            &mut self,
+            _snapshot: &crate::render::RenderItemSnapshot,
+        ) -> Result<(), crate::error::BarrsError> {
+            Ok(())
+        }
     }
 
     impl Renderer for CountingRenderer {
@@ -859,6 +900,27 @@ return {{
       hover = {{ tooltip = "Current time" }}
     }}
   }}
+}}
+"#,
+                socket_path.display()
+            ),
+        )
+        .expect("write config");
+    }
+
+    fn write_item_config(path: &Path, socket_path: &Path, item_ids: &[&str]) {
+        let items = item_ids
+            .iter()
+            .map(|id| format!(r#"{{ id = "{id}", label = "{id}" }}"#))
+            .collect::<Vec<_>>()
+            .join(", ");
+        fs::write(
+            path,
+            format!(
+                r#"
+return {{
+  socket_path = "{}",
+  items = {{ {items} }}
 }}
 "#,
                 socket_path.display()
@@ -1291,6 +1353,70 @@ return {{
             .await
             .expect("stop");
         task.await.expect("join").expect("daemon result");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reload_reconciles_removed_and_renamed_renderer_items() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("barrs.sock");
+        let config_path = dir.path().join("barrs.lua");
+        write_item_config(&config_path, &socket_path, &["old", "retained"]);
+
+        let config = load_config(&config_path).expect("config");
+        let mut daemon =
+            Daemon::new(config_path.clone(), config, NativeRenderer::default()).expect("daemon");
+        daemon.refresh_all_items().await.expect("initial render");
+        write_item_config(&config_path, &socket_path, &["retained", "new"]);
+
+        daemon.reload().await.expect("reload");
+
+        let state = daemon.state.lock().await;
+        let mut item_ids = state.item_states.keys().cloned().collect::<Vec<_>>();
+        item_ids.sort();
+        assert_eq!(item_ids, vec!["new", "retained"]);
+        let mut rendered_ids = state
+            .renderer
+            .surface_state()
+            .items
+            .iter()
+            .map(|item| item.snapshot.id.clone())
+            .collect::<Vec<_>>();
+        rendered_ids.sort();
+        assert_eq!(rendered_ids, vec!["new", "retained"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_renderer_reload_retains_the_previous_daemon_state() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("barrs.sock");
+        let config_path = dir.path().join("barrs.lua");
+        write_item_config(&config_path, &socket_path, &["old"]);
+
+        let fail_initialization = Arc::new(AtomicBool::new(false));
+        let initializations = Arc::new(AtomicUsize::new(0));
+        let renderer = FailingReconcileRenderer {
+            fail_initialization: Arc::clone(&fail_initialization),
+            initializations: Arc::clone(&initializations),
+        };
+        let config = load_config(&config_path).expect("config");
+        let mut daemon = Daemon::new(config_path.clone(), config, renderer).expect("daemon");
+        daemon.refresh_all_items().await.expect("initial render");
+        assert_eq!(initializations.load(Ordering::SeqCst), 1);
+
+        write_item_config(&config_path, &socket_path, &["retained"]);
+        daemon.reload().await.expect("successful reload");
+        assert_eq!(initializations.load(Ordering::SeqCst), 2);
+
+        write_item_config(&config_path, &socket_path, &["new"]);
+        fail_initialization.store(true, Ordering::SeqCst);
+        daemon.reload().await.expect_err("reload must fail");
+
+        let state = daemon.state.lock().await;
+        assert_eq!(state.config.items[0].id, "retained");
+        assert!(state.item_states.contains_key("retained"));
+        assert!(!state.item_states.contains_key("old"));
+        assert!(!state.item_states.contains_key("new"));
+        assert_eq!(initializations.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test(flavor = "current_thread")]
