@@ -118,6 +118,48 @@ Items can be placed in three sections with `placement`:
 
 Omitting `placement` defaults to `left`. Left items flow from the left edge, right items flow inward from the right edge, and middle/center items are centered in the available bar space. On built-in Mac displays with a notch, middle items are split around the reserved notch gap so they do not render under the notch.
 
+### Lua event handlers
+
+Assign global Lua function names in an item's `handlers` table. Each slot is
+called for its matching event:
+
+| Handler slot | Event value |
+|---|---|
+| `click` | `click` |
+| `right_click` | `right_click` |
+| `scroll` | `scroll` |
+| `hover_enter` | `hover_enter` |
+| `hover_leave` | `hover_leave` |
+| `hover_update` | `hover_update` |
+
+Each function receives one `ctx` table:
+
+```lua
+{
+  item_id = "time",
+  event = "click",
+  timestamp_ms = 0,
+  mouse = { x = 0, y = 0, button = nil, scroll_delta = nil },
+  modifiers = { shift = false, control = false, option = false, command = false },
+}
+```
+
+`mouse.button` is present for pointer buttons, `mouse.scroll_delta` is present
+for scroll events, and both are otherwise `nil`. Handler return values are
+ignored. A configured handler name must exist when the config is loaded. If a
+handler raises an error while processing an IPC request, the daemon returns an
+error response and the CLI exits nonzero; errors from native renderer events
+are logged by the daemon.
+
+The bundled sample records the most recent time-item event in Lua state without
+launching external programs:
+
+```lua
+function record_time_event(ctx)
+  last_time_event = ctx.event
+end
+```
+
 The bar also accepts SketchyBar-style notch settings:
 
 ```lua

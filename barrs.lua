@@ -1,5 +1,6 @@
-function open_clock(ctx)
-	return true
+function record_time_event(ctx)
+	-- Keep a deterministic in-process record of the latest event.
+	last_time_event = ctx.event
 end
 
 return {
@@ -49,7 +50,7 @@ return {
 			placement = "middle",
 			interval = 1,
 			plugin = { kind = "time" },
-			handlers = { click = "open_clock" },
+			handlers = { click = "record_time_event" },
 			hover = { tooltip = "Current time" },
 		},
 		{

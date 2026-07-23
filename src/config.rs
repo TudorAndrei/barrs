@@ -260,6 +260,7 @@ impl ItemHandlers {
 mod tests {
     use std::fs;
 
+    use mlua::LuaSerdeExt;
     use tempfile::tempdir;
 
     use super::{BarConfig, BarSection, PluginKind, load_config};
@@ -286,6 +287,7 @@ return {
       handlers = { click = "handle_click" },
       hover = { tooltip = "Current time" }
     }
+
   }
 }
 "#,
@@ -303,6 +305,29 @@ return {
             config.items[0].plugin.as_ref().expect("plugin").kind,
             PluginKind::Time
         );
+    }
+
+    #[test]
+    fn bundled_lua_sample_handler_accepts_a_click_context() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("barrs.lua");
+        let (config, lua) = super::load_config_with_runtime(&path).expect("sample config");
+        assert!(config.items.iter().any(|item| item.id == "time"));
+
+        let handler: mlua::Function = lua
+            .globals()
+            .get("record_time_event")
+            .expect("sample handler");
+        let payload =
+            crate::ipc::EventPayload::from_trigger("time".into(), crate::cli::TriggerEvent::Click);
+        handler
+            .call::<()>(lua.to_value(&payload).expect("serialize context"))
+            .expect("sample handler call");
+
+        let event: String = lua
+            .globals()
+            .get("last_time_event")
+            .expect("recorded event");
+        assert_eq!(event, "click");
     }
 
     #[test]

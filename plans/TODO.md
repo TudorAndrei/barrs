@@ -79,12 +79,12 @@ commit succeeds.
 
 - [x] Complete `plans/013-align-release-documentation.md`.
 - [x] AGENTS and README name one canonical non-executed flow.
-- [ ] Commit: `docs(release): align canonical release workflow`
+- [x] Commit: `docs(release): align canonical release workflow`
 
 ## Phase 14: Lua handler documentation
 
-- [ ] Complete `plans/014-document-lua-handler-contract.md`.
-- [ ] Handler/context/return/error contract and sample are accurate.
+- [x] Complete `plans/014-document-lua-handler-contract.md`.
+- [x] Handler/context/return/error contract and sample are accurate.
 - [ ] Commit: `docs(config): define lua handler contract`
 
 ## Phase 15: Lua provider spike

@@ -85,12 +85,12 @@ effects.
 
 ## Done criteria
 
-- [ ] All handler slots and context fields are documented.
-- [ ] Return/error semantics are accurate.
-- [ ] Bundled sample behavior matches its name.
-- [ ] Full quality gate passes.
-- [ ] `git status --short` lists only scoped files and the plan status update.
-- [ ] `plans/README.md` row is updated.
+- [x] All handler slots and context fields are documented.
+- [x] Return/error semantics are accurate.
+- [x] Bundled sample behavior matches its name.
+- [x] Full quality gate passes.
+- [x] `git status --short` lists only scoped files and the plan status update.
+- [x] `plans/README.md` row is updated.
 
 ## STOP conditions
 
