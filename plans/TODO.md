@@ -61,12 +61,12 @@ commit succeeds.
 
 - [x] Complete `plans/010-elide-unchanged-hover-publications.md`.
 - [x] Same-target updates preserve handlers without AppKit publication.
-- [ ] Commit: `perf(render): skip unchanged hover publications` (pending this phase's commit)
+- [x] Commit: `perf(render): skip unchanged hover publications`
 
 ## Phase 11: Rift counts
 
-- [ ] Complete `plans/011-preserve-rift-window-counts.md`.
-- [ ] Counts 0, 1, and 3 remain exact across workspace switches.
+- [x] Complete `plans/011-preserve-rift-window-counts.md`.
+- [x] Counts 0, 1, and 3 remain exact across workspace switches.
 - [ ] Commit: `fix(rift): preserve workspace window counts`
 
 ## Phase 12: Synthetic hover

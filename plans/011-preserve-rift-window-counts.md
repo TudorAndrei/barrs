@@ -83,12 +83,12 @@ Extend `workspace_changed_event_updates_current_workspace` with target counts
 
 ## Done criteria
 
-- [ ] No boolean-to-count conversion remains.
-- [ ] Multi-window switch test reports the exact count.
-- [ ] Occupancy rendering remains correct.
-- [ ] Full gate passes.
-- [ ] `git status --short` lists only scoped files and the plan status update.
-- [ ] `plans/README.md` row is updated.
+- [x] No boolean-to-count conversion remains.
+- [x] Multi-window switch test reports the exact count.
+- [x] Occupancy rendering remains correct.
+- [x] Full gate passes.
+- [x] `git status --short` lists only scoped files and the plan status update.
+- [x] `plans/README.md` row is updated.
 
 ## STOP conditions
 

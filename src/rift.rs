@@ -55,6 +55,8 @@ impl RiftSnapshot {
 pub struct RiftWorkspace {
     pub name: String,
     pub is_current: bool,
+    /// Exact count from Rift's workspace snapshot or windows-changed payload.
+    pub window_count: usize,
     pub has_windows: bool,
 }
 
@@ -229,6 +231,7 @@ fn mach_snapshot() -> Result<RiftSnapshot, BarrsError> {
             vec![RiftWorkspace {
                 name: active.display_name(),
                 is_current: true,
+                window_count,
                 has_windows: window_count > 0,
             }]
         } else {
@@ -237,6 +240,7 @@ fn mach_snapshot() -> Result<RiftSnapshot, BarrsError> {
                 .map(|workspace| RiftWorkspace {
                     name: workspace.display_name(),
                     is_current: workspace.active,
+                    window_count: workspace.window_count.unwrap_or(0),
                     has_windows: workspace.window_count.unwrap_or(0) > 0,
                 })
                 .collect()
@@ -272,6 +276,7 @@ fn cli_snapshot() -> Option<RiftSnapshot> {
             vec![RiftWorkspace {
                 name: active.display_name(),
                 is_current: true,
+                window_count,
                 has_windows: window_count > 0,
             }]
         } else {
@@ -280,6 +285,7 @@ fn cli_snapshot() -> Option<RiftSnapshot> {
                 .map(|workspace| RiftWorkspace {
                     name: workspace.display_name(),
                     is_current: workspace.active,
+                    window_count: workspace.window_count.unwrap_or(0),
                     has_windows: workspace.window_count.unwrap_or(0) > 0,
                 })
                 .collect()
@@ -496,7 +502,7 @@ fn apply_workspace_changed(snapshot: &mut RiftSnapshot, payload: &Value) -> Rift
         .workspaces
         .iter()
         .find(|workspace| workspace.is_current)
-        .map(|workspace| usize::from(workspace.has_windows))
+        .map(|workspace| workspace.window_count)
         .unwrap_or(snapshot.window_count);
 
     if changed {
@@ -527,6 +533,10 @@ fn apply_windows_changed(snapshot: &mut RiftSnapshot, payload: &Value) -> RiftAp
         if workspace.name == target_name {
             found = true;
             let has_windows = window_count > 0;
+            if workspace.window_count != window_count {
+                workspace.window_count = window_count;
+                changed = true;
+            }
             if workspace.has_windows != has_windows {
                 workspace.has_windows = has_windows;
                 changed = true;
@@ -955,12 +965,14 @@ mod tests {
                 RiftWorkspace {
                     name: "1".into(),
                     is_current: true,
+                    window_count: 1,
                     has_windows: true,
                 },
                 RiftWorkspace {
                     name: "2".into(),
                     is_current: false,
-                    has_windows: false,
+                    window_count: 3,
+                    has_windows: true,
                 },
             ],
             layout: "tiling".into(),
@@ -978,6 +990,7 @@ mod tests {
         assert_eq!(snapshot.layout, "bsp");
         assert!(snapshot.workspaces[1].is_current);
         assert!(!snapshot.workspaces[0].is_current);
+        assert_eq!(snapshot.window_count, 3);
     }
 
     #[test]
@@ -988,11 +1001,13 @@ mod tests {
                 RiftWorkspace {
                     name: "1".into(),
                     is_current: false,
+                    window_count: 0,
                     has_windows: false,
                 },
                 RiftWorkspace {
                     name: "2".into(),
                     is_current: true,
+                    window_count: 1,
                     has_windows: true,
                 },
             ],
@@ -1008,7 +1023,60 @@ mod tests {
         );
         assert_eq!(changed, RiftApplyResult::Updated);
         assert!(snapshot.workspaces[0].has_windows);
+        assert_eq!(snapshot.workspaces[0].window_count, 2);
         assert_eq!(snapshot.window_count, 1);
+    }
+
+    #[test]
+    fn workspace_changes_preserve_exact_cached_window_counts() {
+        let mut snapshot = RiftSnapshot {
+            current_workspace: "3".into(),
+            workspaces: vec![
+                RiftWorkspace {
+                    name: "1".into(),
+                    is_current: false,
+                    window_count: 0,
+                    has_windows: false,
+                },
+                RiftWorkspace {
+                    name: "2".into(),
+                    is_current: false,
+                    window_count: 1,
+                    has_windows: true,
+                },
+                RiftWorkspace {
+                    name: "3".into(),
+                    is_current: true,
+                    window_count: 3,
+                    has_windows: true,
+                },
+            ],
+            layout: "tiling".into(),
+            window_count: 3,
+        };
+
+        for (workspace_index, expected_count) in [(0, 0), (1, 1), (2, 3)] {
+            assert_eq!(
+                apply_event(
+                    &mut snapshot,
+                    &RiftEvent {
+                        kind: RiftEventKind::WorkspaceChanged,
+                        payload: json!({ "workspace_index": workspace_index }),
+                    },
+                ),
+                RiftApplyResult::Updated
+            );
+            assert_eq!(snapshot.window_count, expected_count);
+            assert_eq!(
+                snapshot
+                    .workspaces
+                    .iter()
+                    .find(|workspace| workspace.is_current)
+                    .expect("current workspace")
+                    .window_count,
+                expected_count
+            );
+        }
     }
 
     #[test]
@@ -1018,6 +1086,7 @@ mod tests {
             workspaces: vec![RiftWorkspace {
                 name: "1".into(),
                 is_current: true,
+                window_count: 1,
                 has_windows: true,
             }],
             layout: "tiling".into(),

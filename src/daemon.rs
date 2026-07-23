@@ -1592,6 +1592,7 @@ return {{
             workspaces: vec![crate::rift::RiftWorkspace {
                 name: current_workspace.into(),
                 is_current: true,
+                window_count: 1,
                 has_windows: true,
             }],
             layout: "tiling".into(),

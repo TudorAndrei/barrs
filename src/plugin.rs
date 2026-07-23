@@ -267,6 +267,7 @@ impl Plugin for RiftWorkspacesPlugin {
             "workspaces": snapshot.workspaces.iter().map(|workspace| json!({
                 "name": workspace.name,
                 "is_current": workspace.is_current,
+                "window_count": workspace.window_count,
                 "has_windows": workspace.has_windows
             })).collect::<Vec<_>>(),
         }))
@@ -367,16 +368,19 @@ mod tests {
                 RiftWorkspace {
                     name: "1".into(),
                     is_current: false,
+                    window_count: 3,
                     has_windows: true,
                 },
                 RiftWorkspace {
                     name: "2".into(),
                     is_current: true,
+                    window_count: 4,
                     has_windows: true,
                 },
                 RiftWorkspace {
                     name: "3".into(),
                     is_current: false,
+                    window_count: 0,
                     has_windows: false,
                 },
             ],
@@ -389,6 +393,7 @@ mod tests {
         assert_eq!(snapshot["current_workspace"], "2");
         assert_eq!(snapshot["text"], "1 2 3");
         assert_eq!(snapshot["workspaces"][0]["has_windows"], true);
+        assert_eq!(snapshot["workspaces"][0]["window_count"], 3);
         assert_eq!(snapshot["workspaces"][1]["is_current"], true);
     }
 
