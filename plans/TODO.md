@@ -97,12 +97,12 @@ commit succeeds.
 
 - [x] Complete `plans/016-spike-display-targeting.md`.
 - [x] Selector, fallback, transition matrix, and compatibility are specified.
-- [ ] Commit: `docs(design): specify display targeting`
+- [x] Commit: `docs(design): specify display targeting`
 
 ## Phase 17: Doctor command design
 
-- [ ] Complete `plans/017-design-doctor-command.md`.
-- [ ] Probe, JSON, exit-status, redaction, and phase contracts are specified.
+- [x] Complete `plans/017-design-doctor-command.md`.
+- [x] Probe, JSON, exit-status, redaction, and phase contracts are specified.
 - [ ] Commit: `docs(design): specify doctor diagnostics`
 
 ## Verification

@@ -28,7 +28,7 @@ is in [TODO.md](./TODO.md).
 | 014 | Document Lua handler contract | Finding 16 | P2 | S | 003, 012 | DONE |
 | 015 | Spike Lua snapshot providers | Direction 1 | P3 | M | 008, 014 | DONE |
 | 016 | Spike display targeting | Direction 2 | P3 | M | 007 | DONE |
-| 017 | Design `barrs doctor` | Direction 3 | P3 | M | 003, 005 | TODO |
+| 017 | Design `barrs doctor` | Direction 3 | P3 | M | 003, 005 | DONE |
 
 Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED: <reason>`, or
 `REJECTED: <reason>`.

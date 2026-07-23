@@ -90,13 +90,13 @@ representative home paths and sensitive-looking environment/config data.
 
 ## Done criteria
 
-- [ ] Diagnostic and JSON contracts are complete.
-- [ ] Exit statuses align with Plan 003.
-- [ ] Redaction rules prevent accidental sensitive output.
-- [ ] Foreground and service installs are both supported.
-- [ ] No production code changed.
-- [ ] `git status --short` lists only the spike document and plan status update.
-- [ ] `plans/README.md` row is updated.
+- [x] Diagnostic and JSON contracts are complete.
+- [x] Exit statuses align with Plan 003.
+- [x] Redaction rules prevent accidental sensitive output.
+- [x] Foreground and service installs are both supported.
+- [x] No production code changed.
+- [x] `git status --short` lists only the spike document and plan status update.
+- [x] `plans/README.md` row is updated.
 
 ## STOP conditions
 
