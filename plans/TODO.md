@@ -73,12 +73,12 @@ commit succeeds.
 
 - [x] Complete `plans/012-target-synthetic-hover-by-item-id.md`.
 - [x] Enter/update/leave target the requested ID; unknown IDs fail.
-- [ ] Commit: `fix(render): honor synthetic hover item targets`
+- [x] Commit: `fix(render): honor synthetic hover item targets`
 
 ## Phase 13: Release documentation
 
-- [ ] Complete `plans/013-align-release-documentation.md`.
-- [ ] AGENTS and README name one canonical non-executed flow.
+- [x] Complete `plans/013-align-release-documentation.md`.
+- [x] AGENTS and README name one canonical non-executed flow.
 - [ ] Commit: `docs(release): align canonical release workflow`
 
 ## Phase 14: Lua handler documentation

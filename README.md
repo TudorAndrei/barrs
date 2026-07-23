@@ -183,7 +183,7 @@ barrs item trigger <item-id> <event>
 
 ## Releases
 
-Releases are automated from conventional commits on `main`. When a qualifying commit is pushed, GitHub Actions uses Cocogitto to calculate the next SemVer version, updates [CHANGELOG.md](./CHANGELOG.md), and uses `cargo-release` to create the release commit and matching `v{{version}}` tag.
+Releases are automated from conventional commits on `main`. Cocogitto derives the next SemVer version; the canonical local flow updates [CHANGELOG.md](./CHANGELOG.md) and Cargo metadata, then uses `cargo-release` to create the release commit and matching `v{{version}}` tag.
 
 Install the local release tooling with `mise`:
 
@@ -197,7 +197,7 @@ Preview the next automatic version:
 mise run release-plan
 ```
 
-Cut the release locally:
+From a clean `main` working tree, execute the reviewed release:
 
 ```bash
 mise run release-auto
@@ -212,7 +212,8 @@ This repository uses [release.toml](./release.toml) to:
 
 After the tag is pushed, GitHub Actions builds the macOS archives, publishes the GitHub release assets, and updates `Formula/barrs.rb`.
 
-For manual releases, keep using `cargo-release`; do not hand-edit `Cargo.toml` and manually tag.
+`release-auto` invokes `cargo-release` internally. Do not run a separate manual
+patch-release flow, hand-edit `Cargo.toml`, or create tags manually.
 
 ## Notes
 

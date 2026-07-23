@@ -83,12 +83,12 @@ check; never use `--execute`.
 
 ## Done criteria
 
-- [ ] AGENTS and README identify one canonical release flow.
-- [ ] Version/tag matching and no-publish policies remain explicit.
-- [ ] No release state changed.
-- [ ] `git diff --check` passes.
-- [ ] `git status --short` lists only scoped files and the plan status update.
-- [ ] `plans/README.md` row is updated.
+- [x] AGENTS and README identify one canonical release flow.
+- [x] Version/tag matching and no-publish policies remain explicit.
+- [x] No release state changed.
+- [x] `git diff --check` passes.
+- [x] `git status --short` lists only scoped files and the plan status update.
+- [x] `plans/README.md` row is updated.
 
 ## STOP conditions
 
