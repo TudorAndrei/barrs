@@ -87,13 +87,13 @@ refresh, malformed JSON, and Stop-response cases.
 
 ## Done criteria
 
-- [ ] Frames larger than the limit never allocate beyond the bounded buffer.
-- [ ] One silent client does not delay ping or scheduled refresh.
-- [ ] Stateful request execution remains serialized.
-- [ ] Stop/reload/error response tests pass.
-- [ ] `mise run check` exits 0.
-- [ ] `git status --short` lists only scoped files and the plan status update.
-- [ ] `plans/README.md` row is updated.
+- [x] Frames larger than the limit never allocate beyond the bounded buffer.
+- [x] One silent client does not delay ping or scheduled refresh.
+- [x] Stateful request execution remains serialized.
+- [x] Stop/reload/error response tests pass.
+- [x] `mise run check` exits 0.
+- [x] `git status --short` lists only scoped files and the plan status update.
+- [x] `plans/README.md` row is updated.
 
 ## STOP conditions
 

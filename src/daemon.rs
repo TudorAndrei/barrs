@@ -6,14 +6,13 @@ use std::sync::Arc;
 
 use mlua::{Lua, LuaSerdeExt};
 use serde_json::json;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::{self, Duration, Instant};
 
 use crate::config::{Config, ItemConfig, PluginKind, load_config_with_runtime};
 use crate::error::BarrsError;
-use crate::ipc::{EventPayload, Request, Response};
+use crate::ipc::{EventPayload, Request, Response, read_request_frame, write_response};
 use crate::plugin::from_item_config;
 use crate::render::{RenderItemSnapshot, Renderer};
 use crate::rift::{
@@ -24,7 +23,7 @@ use crate::rift::{
 const EVENT_TICK_MS: u64 = 16;
 const POLL_TICK_MS: u64 = 250;
 const RIFT_DEBOUNCE_MS: u64 = 16;
-const REQUEST_READ_TIMEOUT_MS: u64 = 2_000;
+const PENDING_IPC_REQUESTS: usize = 64;
 
 pub struct Daemon<R: Renderer> {
     config_path: PathBuf,
@@ -32,10 +31,47 @@ pub struct Daemon<R: Renderer> {
     pending_refresh: Option<tokio::task::JoinHandle<PendingRefresh>>,
 }
 
+async fn serve_connection(mut stream: UnixStream, sender: mpsc::Sender<IncomingRequest>) {
+    let request = match read_request_frame(&mut stream).await {
+        Ok(request) => request,
+        Err(error) => {
+            let _ = write_response(&mut stream, &error.response()).await;
+            return;
+        }
+    };
+    let (response_sender, response_receiver) = oneshot::channel();
+    if sender
+        .send(IncomingRequest {
+            request,
+            response: response_sender,
+        })
+        .await
+        .is_err()
+    {
+        let _ = write_response(
+            &mut stream,
+            &Response::Error {
+                message: "daemon stopped before handling request".into(),
+            },
+        )
+        .await;
+        return;
+    }
+    let response = response_receiver.await.unwrap_or(Response::Error {
+        message: "daemon stopped before responding".into(),
+    });
+    let _ = write_response(&mut stream, &response).await;
+}
+
 struct PendingRefresh {
     epoch: u64,
     item_ids: Vec<String>,
     states: Vec<(String, RenderItemSnapshot)>,
+}
+
+struct IncomingRequest {
+    request: Request,
+    response: oneshot::Sender<Response>,
 }
 
 struct DaemonState<R: Renderer> {
@@ -88,6 +124,7 @@ impl<R: Renderer> Daemon<R> {
         };
         cleanup_socket(&socket_path)?;
         let listener = UnixListener::bind(&socket_path)?;
+        let (request_sender, mut request_receiver) = mpsc::channel(PENDING_IPC_REQUESTS);
         let mut event_tick = time::interval(Duration::from_millis(EVENT_TICK_MS));
         let mut poll_tick = time::interval(Duration::from_millis(POLL_TICK_MS));
 
@@ -106,12 +143,29 @@ impl<R: Renderer> Daemon<R> {
                 }
                 accept_result = listener.accept() => {
                     match accept_result {
-                        Ok((stream, _)) => match self.handle_connection(stream).await {
-                            Ok(true) => break,
-                            Ok(false) => {}
-                            Err(error) => eprintln!("barrs: connection failed: {error}"),
-                        },
+                        Ok((stream, _)) => {
+                            let sender = request_sender.clone();
+                            tokio::spawn(async move {
+                                serve_connection(stream, sender).await;
+                            });
+                        }
                         Err(error) => eprintln!("barrs: accept failed: {error}"),
+                    }
+                }
+                incoming = request_receiver.recv() => {
+                    let Some(incoming) = incoming else {
+                        continue;
+                    };
+                    let response = match self.handle_request(incoming.request).await {
+                        Ok(response) => response,
+                        Err(error) => Response::Error {
+                            message: error.to_string(),
+                        },
+                    };
+                    let stop = matches!(response, Response::Ok { ref message } if message == "stopping");
+                    let _ = incoming.response.send(response);
+                    if stop {
+                        break;
                     }
                 }
                 _ = event_tick.tick() => {
@@ -135,48 +189,6 @@ impl<R: Renderer> Daemon<R> {
         }
         cleanup_socket(&socket_path)?;
         Ok(())
-    }
-
-    async fn handle_connection(&mut self, stream: UnixStream) -> Result<bool, BarrsError> {
-        let mut line = String::new();
-        let mut reader = BufReader::new(stream);
-        let read = tokio::time::timeout(
-            Duration::from_millis(REQUEST_READ_TIMEOUT_MS),
-            reader.read_line(&mut line),
-        )
-        .await;
-        let bytes = match read {
-            Ok(Ok(bytes)) => bytes,
-            Ok(Err(error)) => {
-                eprintln!("barrs: failed to read request: {error}");
-                return Ok(false);
-            }
-            Err(_) => {
-                eprintln!("barrs: request read timed out");
-                return Ok(false);
-            }
-        };
-        if bytes == 0 {
-            return Ok(false);
-        }
-        let response = match serde_json::from_str::<Request>(line.trim()) {
-            Ok(request) => match self.handle_request(request).await {
-                Ok(response) => response,
-                Err(error) => Response::Error {
-                    message: error.to_string(),
-                },
-            },
-            Err(error) => Response::Error {
-                message: format!("invalid request: {error}"),
-            },
-        };
-        let stop = matches!(response, Response::Ok { ref message } if message == "stopping");
-        let mut stream = reader.into_inner();
-        let response_json = serde_json::to_string(&response)?;
-        stream.write_all(response_json.as_bytes()).await?;
-        stream.write_all(b"\n").await?;
-        stream.flush().await?;
-        Ok(stop)
     }
 
     async fn handle_request(&mut self, request: Request) -> Result<Response, BarrsError> {
@@ -1060,21 +1072,47 @@ return {{
         let dir = tempdir().expect("tempdir");
         let socket_path = dir.path().join("barrs.sock");
         let config_path = dir.path().join("barrs.lua");
-        write_config(&config_path, &socket_path);
+        write_refreshing_config(&config_path, &socket_path);
 
         let config = load_config(&config_path).expect("config");
-        let daemon =
-            Daemon::new(config_path.clone(), config, NoopRenderer::default()).expect("daemon");
+        let renders = Arc::new(AtomicUsize::new(0));
+        let renderer = CountingRenderer {
+            renders: Arc::clone(&renders),
+        };
+        let daemon = Daemon::new(config_path.clone(), config, renderer).expect("daemon");
+        daemon
+            .state
+            .lock()
+            .await
+            .refresh_deadlines
+            .insert("clock".into(), tokio::time::Instant::now());
         let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
 
         wait_for_socket(&socket_path).await;
         let _silent = UnixStream::connect(&socket_path).await.expect("connect");
-        tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
 
-        let pong = send_request(&socket_path, &Request::Ping)
-            .await
-            .expect("ping");
+        let pong = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            send_request(&socket_path, &Request::Ping),
+        )
+        .await
+        .expect("silent client must not delay ping")
+        .expect("ping");
         assert!(matches!(pong, Response::Pong));
+        tokio::time::timeout(std::time::Duration::from_millis(750), async {
+            while renders.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("scheduled refresh must complete while a client is silent");
+
+        let mut abandoned = UnixStream::connect(&socket_path).await.expect("connect");
+        abandoned
+            .write_all(b"{\"type\":\"ping\"}\n")
+            .await
+            .expect("write request");
+        drop(abandoned);
 
         let _ = send_request(&socket_path, &Request::Stop)
             .await

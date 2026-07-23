@@ -19,13 +19,13 @@ commit succeeds.
 
 - [x] Complete `plans/003-propagate-daemon-response-errors.md`.
 - [x] Daemon-declared errors produce nonzero process status.
-- [ ] Commit: `fix(cli): propagate daemon response errors` (pending this phase's commit)
+- [x] Commit: `fix(cli): propagate daemon response errors`
 
 ## Phase 4: IPC hardening
 
-- [ ] Complete `plans/004-harden-ipc-framing-and-concurrency.md`.
-- [ ] Oversized/silent-client regressions pass.
-- [ ] Commit: `fix(ipc): bound frames and isolate slow clients`
+- [x] Complete `plans/004-harden-ipc-framing-and-concurrency.md`.
+- [x] Oversized/silent-client regressions pass.
+- [ ] Commit: `fix(ipc): bound frames and isolate slow clients` (pending this phase's commit)
 
 ## Phase 5: Startup lifecycle
 

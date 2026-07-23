@@ -15,7 +15,7 @@ is in [TODO.md](./TODO.md).
 | 001 | Enforce Rust quality gates | Finding 11 | P1 | S | — | DONE |
 | 002 | Characterize daemon state machines | Finding 14 | P1 | M | 001 | DONE |
 | 003 | Propagate daemon response errors | Finding 3 | P1 | S | 001 | DONE |
-| 004 | Harden IPC framing and concurrency | Findings 2, 6 | P1 | M | 001, 002 | TODO |
+| 004 | Harden IPC framing and concurrency | Findings 2, 6 | P1 | M | 001, 002 | DONE |
 | 005 | Make startup single-instance and ready | Findings 1, 7 | P1 | M | 003, 004 | TODO |
 | 006 | Reconcile renderer items on reload | Finding 4 | P1 | M | 001, 002 | TODO |
 | 007 | Confine AppKit to the main thread | Finding 5 | P1 | M | 001, 006 | TODO |
