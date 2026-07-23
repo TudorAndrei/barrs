@@ -22,10 +22,11 @@ pub async fn run(cli: Cli) -> Result<(), BarrsError> {
             let config_path = resolve_config_path(args.config);
             ensure_config_exists(&config_path)?;
             if cfg!(debug_assertions) {
-                let config = config::load_config(&config_path)?;
-                let daemon = Daemon::new(
+                let (config, lua) = config::load_config_with_runtime(&config_path)?;
+                let daemon = Daemon::new_loaded(
                     config_path,
                     apply_socket_override(config, args.socket),
+                    lua,
                     create_renderer(crate::render::RendererKind::Native)?,
                 )?;
                 return daemon.run().await;
@@ -43,10 +44,11 @@ pub async fn run(cli: Cli) -> Result<(), BarrsError> {
         Command::Run(args) => {
             let config_path = resolve_config_path(args.config);
             ensure_config_exists(&config_path)?;
-            let config = config::load_config(&config_path)?;
-            let daemon = Daemon::new(
+            let (config, lua) = config::load_config_with_runtime(&config_path)?;
+            let daemon = Daemon::new_loaded(
                 config_path,
                 apply_socket_override(config, args.socket),
+                lua,
                 create_renderer(args.renderer)?,
             )?;
             daemon.run().await

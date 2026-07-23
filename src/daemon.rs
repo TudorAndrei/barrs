@@ -94,8 +94,12 @@ struct DaemonState<R: Renderer> {
 }
 
 impl<R: Renderer> Daemon<R> {
-    pub fn new(config_path: PathBuf, config: Config, renderer: R) -> Result<Self, BarrsError> {
-        let (_, lua) = load_config_with_runtime(&config_path)?;
+    pub fn new_loaded(
+        config_path: PathBuf,
+        config: Config,
+        lua: Lua,
+        renderer: R,
+    ) -> Result<Self, BarrsError> {
         let backend = select_backend();
         let backend_kind = backend.kind();
         let state = DaemonState {
@@ -117,6 +121,12 @@ impl<R: Renderer> Daemon<R> {
             state: Arc::new(Mutex::new(state)),
             pending_refresh: None,
         })
+    }
+
+    #[cfg(test)]
+    fn new(config_path: PathBuf, config: Config, renderer: R) -> Result<Self, BarrsError> {
+        let (_, lua) = load_config_with_runtime(&config_path)?;
+        Self::new_loaded(config_path, config, lua, renderer)
     }
 
     pub async fn run(mut self) -> Result<(), BarrsError> {
@@ -990,6 +1000,46 @@ return {{
         .expect("write config");
     }
 
+    fn write_evaluation_config(
+        path: &Path,
+        socket_path: &Path,
+        evaluation_path: &Path,
+        handler_path: &Path,
+    ) {
+        fs::write(
+            path,
+            format!(
+                r#"
+local evaluation_file = io.open([=[{}]=], "r")
+local previous = evaluation_file and tonumber(evaluation_file:read("*a")) or 0
+if evaluation_file then evaluation_file:close() end
+local generation = previous + 1
+local write_evaluation = io.open([=[{}]=], "w")
+write_evaluation:write(tostring(generation))
+write_evaluation:close()
+
+function record_generation(ctx)
+  local handler_file = io.open([=[{}]=], "w")
+  handler_file:write(tostring(generation))
+  handler_file:close()
+end
+
+return {{
+  socket_path = "{}",
+  items = {{
+    {{ id = "generation", label = tostring(generation), handlers = {{ click = "record_generation" }} }}
+  }}
+}}
+"#,
+                evaluation_path.display(),
+                evaluation_path.display(),
+                handler_path.display(),
+                socket_path.display(),
+            ),
+        )
+        .expect("write config");
+    }
+
     async fn wait_for_socket(socket_path: &Path) {
         for _ in 0..20 {
             if socket_path.exists() {
@@ -1353,6 +1403,56 @@ return {{
             .await
             .expect("stop");
         task.await.expect("join").expect("daemon result");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn loaded_config_and_lua_runtime_are_evaluated_once_together() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("barrs.sock");
+        let config_path = dir.path().join("barrs.lua");
+        let evaluation_path = dir.path().join("evaluations.txt");
+        let handler_path = dir.path().join("handler.txt");
+        write_evaluation_config(&config_path, &socket_path, &evaluation_path, &handler_path);
+
+        let (config, lua) = crate::config::load_config_with_runtime(&config_path).expect("load");
+        let mut daemon =
+            Daemon::new_loaded(config_path.clone(), config, lua, NoopRenderer::default())
+                .expect("daemon");
+        assert_eq!(
+            fs::read_to_string(&evaluation_path).expect("evaluation"),
+            "1"
+        );
+        daemon.refresh_all_items().await.expect("initial render");
+        assert_eq!(
+            daemon.state.lock().await.item_states["generation"].text,
+            "1"
+        );
+        daemon
+            .dispatch_event(crate::ipc::EventPayload::from_trigger(
+                "generation".into(),
+                crate::cli::TriggerEvent::Click,
+            ))
+            .await
+            .expect("handler");
+        assert_eq!(fs::read_to_string(&handler_path).expect("handler"), "1");
+
+        daemon.reload().await.expect("reload");
+        assert_eq!(
+            fs::read_to_string(&evaluation_path).expect("evaluation"),
+            "2"
+        );
+        assert_eq!(
+            daemon.state.lock().await.item_states["generation"].text,
+            "2"
+        );
+        daemon
+            .dispatch_event(crate::ipc::EventPayload::from_trigger(
+                "generation".into(),
+                crate::cli::TriggerEvent::Click,
+            ))
+            .await
+            .expect("handler");
+        assert_eq!(fs::read_to_string(&handler_path).expect("handler"), "2");
     }
 
     #[tokio::test(flavor = "current_thread")]

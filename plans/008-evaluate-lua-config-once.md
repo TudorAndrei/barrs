@@ -80,12 +80,12 @@ following the existing `lua_handler_state_persists_between_events` tests.
 
 ## Done criteria
 
-- [ ] Startup evaluates the config once.
-- [ ] Reload evaluates the new config once.
-- [ ] Config and Lua runtime always come from the same evaluation.
-- [ ] Existing handler state tests pass.
-- [ ] `git status --short` lists only scoped files and the plan status update.
-- [ ] `plans/README.md` row is updated.
+- [x] Startup evaluates the config once.
+- [x] Reload evaluates the new config once.
+- [x] Config and Lua runtime always come from the same evaluation.
+- [x] Existing handler state tests pass.
+- [x] `git status --short` lists only scoped files and the plan status update.
+- [x] `plans/README.md` row is updated.
 
 ## STOP conditions
 

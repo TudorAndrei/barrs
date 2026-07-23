@@ -19,7 +19,7 @@ is in [TODO.md](./TODO.md).
 | 005 | Make startup single-instance and ready | Findings 1, 7 | P1 | M | 003, 004 | DONE |
 | 006 | Reconcile renderer items on reload | Finding 4 | P1 | M | 001, 002 | DONE |
 | 007 | Confine AppKit to the main thread | Finding 5 | P1 | M | 001, 006 | DONE |
-| 008 | Evaluate Lua config once | Finding 8 | P2 | S | 001 | TODO |
+| 008 | Evaluate Lua config once | Finding 8 | P2 | S | 001 | DONE |
 | 009 | Clear Rift terminal dirty state | Finding 9 | P2 | S | 002 | TODO |
 | 010 | Elide unchanged hover publications | Finding 10 | P2 | S | 006 | TODO |
 | 011 | Preserve Rift window counts | Finding 12 | P2 | M | 002 | TODO |

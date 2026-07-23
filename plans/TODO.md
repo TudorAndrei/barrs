@@ -43,13 +43,13 @@ commit succeeds.
 
 - [x] Complete `plans/007-confine-appkit-renderer-to-main-thread.md`.
 - [x] Unsafe AppKit `Send`/`Sync` implementations are absent.
-- [ ] Commit: `refactor(render): confine appkit host to main thread` (pending this phase's commit)
+- [x] Commit: `refactor(render): confine appkit host to main thread`
 
 ## Phase 8: Single config evaluation
 
-- [ ] Complete `plans/008-evaluate-lua-config-once.md`.
-- [ ] Startup/reload each evaluate Lua exactly once.
-- [ ] Commit: `fix(config): evaluate lua once per load`
+- [x] Complete `plans/008-evaluate-lua-config-once.md`.
+- [x] Startup/reload each evaluate Lua exactly once.
+- [ ] Commit: `fix(config): evaluate lua once per load` (pending this phase's commit)
 
 ## Phase 9: Rift terminal state
 
