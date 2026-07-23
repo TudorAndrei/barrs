@@ -103,30 +103,33 @@ commit succeeds.
 
 - [x] Complete `plans/017-design-doctor-command.md`.
 - [x] Probe, JSON, exit-status, redaction, and phase contracts are specified.
-- [ ] Commit: `docs(design): specify doctor diagnostics`
+- [x] Commit: `docs(design): specify doctor diagnostics`
 
 ## Verification
 
-- [ ] `cargo fmt --all -- --check` exits 0.
-- [ ] `cargo clippy --all-targets -- -D warnings` exits 0.
-- [ ] `cargo check --all-targets --locked` exits 0.
-- [ ] `cargo test --locked` passes all existing and new tests.
-- [ ] `cargo run --locked -- --version` matches the intended crate version/tag.
+- [x] `cargo fmt --all -- --check` exits 0.
+- [x] `cargo clippy --all-targets -- -D warnings` exits 0.
+- [x] `cargo check --all-targets --locked` exits 0.
+- [x] `cargo test --locked` passes all existing and new tests.
+- [x] `cargo run --locked -- --version` matches the intended crate version/tag.
 - [ ] Manual smoke: foreground noop daemon starts, answers ping/status, reloads,
   rejects a second instance, removes a deleted item, and stops cleanly.
+  **BLOCKED:** the execution harness terminates foreground child sessions before
+  a final stop request; automated lifecycle/reconciliation tests pass.
 - [ ] Manual smoke on macOS: native bar handles hover/click and display hotplug
   without leaving duplicate windows or stale layers.
-- [ ] Edge cases: oversized/silent IPC, stale/live socket, invalid detached
+  **BLOCKED:** requires an interactive AppKit desktop session.
+- [x] Edge cases: oversized/silent IPC, stale/live socket, invalid detached
   startup, failed reload, no-consumer Rift event, equal Rift signature,
   multi-window workspace switch, synthetic hover with mismatched coordinates.
-- [ ] Direction phases changed only `docs/spikes/*.md`.
+- [x] Direction phases changed only `docs/spikes/*.md` plus required plan tracking.
 
 ## Review
 
-- [ ] Every detailed plan's drift check was run before implementation.
-- [ ] Code reviewed with special attention to unsafe/AppKit and IPC boundaries.
-- [ ] `plans/PLAN.md` and affected detailed plans were updated if approach
+- [x] Every detailed plan's drift check was run before implementation.
+- [x] Code reviewed with special attention to unsafe/AppKit and IPC boundaries.
+- [x] `plans/PLAN.md` and affected detailed plans were updated if approach
   changed.
-- [ ] Every phase is a clean conventional commit with its drafted message.
-- [ ] `plans/README.md` status rows reflect actual outcomes.
-- [ ] All TODO items are checked or explicitly marked blocked with a reason.
+- [x] Every phase is a clean conventional commit with its drafted message.
+- [x] `plans/README.md` status rows reflect actual outcomes.
+- [x] All TODO items are checked or explicitly marked blocked with a reason.
