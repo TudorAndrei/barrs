@@ -51,12 +51,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn captures_successful_command_output() {
-        let output = run_command_with_timeout(
-            "printf",
-            &["{\"ok\":true}"],
-            Duration::from_secs(1),
-        )
-        .expect("output");
+        let output = run_command_with_timeout("printf", &["{\"ok\":true}"], Duration::from_secs(1))
+            .expect("output");
 
         assert!(output.status.success());
         assert_eq!(output.stdout, br#"{"ok":true}"#);

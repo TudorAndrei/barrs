@@ -18,8 +18,14 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v5
 
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint all targets
+        run: cargo clippy --all-targets -- -D warnings
+
       - name: Check all targets
-        run: cargo check --all-targets
+        run: cargo check --all-targets --locked
 
       - name: Run tests
-        run: cargo test
+        run: cargo test --locked

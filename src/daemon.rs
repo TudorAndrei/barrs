@@ -342,12 +342,12 @@ impl<R: Renderer> Daemon<R> {
         let backend = state.backend;
         let config = state.config.clone();
         for item_id in pending.item_ids {
-            if let Some(item) = config.items.iter().find(|item| item.id == item_id) {
-                if let Some(refresh_interval) = item_refresh_interval(item, backend) {
-                    state
-                        .refresh_deadlines
-                        .insert(item_id, now + refresh_interval);
-                }
+            if let Some(item) = config.items.iter().find(|item| item.id == item_id)
+                && let Some(refresh_interval) = item_refresh_interval(item, backend)
+            {
+                state
+                    .refresh_deadlines
+                    .insert(item_id, now + refresh_interval);
             }
         }
 

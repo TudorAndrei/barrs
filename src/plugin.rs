@@ -152,7 +152,7 @@ fn parse_cpu_output(output: &str) -> Option<Value> {
 }
 
 fn format_local_time(format: &str) -> Result<String, BarrsError> {
-    let mut timestamp = SystemTime::now()
+    let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|err| BarrsError::Unsupported(err.to_string()))?
         .as_secs() as libc::time_t;
@@ -163,7 +163,7 @@ fn format_local_time(format: &str) -> Result<String, BarrsError> {
 
     // SAFETY: The pointers are valid for writes and remain alive for the duration of the calls.
     unsafe {
-        if libc::localtime_r(&mut timestamp, local_time.as_mut_ptr()).is_null() {
+        if libc::localtime_r(&timestamp, local_time.as_mut_ptr()).is_null() {
             return Err(BarrsError::Unsupported("failed to read local time".into()));
         }
         let written = libc::strftime(

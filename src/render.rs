@@ -512,10 +512,10 @@ impl NativeSurfaceState {
             EventKind::HoverEnter | EventKind::HoverUpdate => {
                 self.active_hover_item = self.item_at(event.mouse.x as f64, event.mouse.y as f64);
             }
-            EventKind::HoverLeave => {
-                if self.active_hover_item.as_deref() == Some(event.item_id.as_str()) {
-                    self.active_hover_item = None;
-                }
+            EventKind::HoverLeave
+                if self.active_hover_item.as_deref() == Some(event.item_id.as_str()) =>
+            {
+                self.active_hover_item = None;
             }
             _ => {}
         }
@@ -620,6 +620,7 @@ struct AppKitItemView {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Default)]
 struct AppKitHost {
     last_scene: Option<BarScene>,
     last_plan: Option<HostScenePlan>,
@@ -641,34 +642,6 @@ struct AppKitHost {
     display_callback_registered: bool,
     notch_offset: u32,
     notch_display_height: u32,
-}
-
-#[cfg(target_os = "macos")]
-impl Default for AppKitHost {
-    fn default() -> Self {
-        Self {
-            last_scene: None,
-            last_plan: None,
-            last_commands: Vec::new(),
-            runtime: HostRuntimeState::default(),
-            app: None,
-            window: None,
-            content_view: None,
-            hover_panel: None,
-            hover_label: None,
-            item_views: HashMap::new(),
-            pending_events: Vec::new(),
-            pointer_item: None,
-            background: None,
-            current_screen_signature: None,
-            display_reconfiguration_pending: None,
-            display_reconfiguration_deadline: None,
-            display_reconfiguration_rebuilds_remaining: 0,
-            display_callback_registered: false,
-            notch_offset: 0,
-            notch_display_height: 0,
-        }
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1042,12 +1015,7 @@ impl AppKitHost {
 
     fn configure_window(&mut self, frame: &WindowFrame) -> Result<(), BarrsError> {
         let mtm = main_thread_marker()?;
-        let anchored = anchor_bar_frame(
-            frame,
-            mtm,
-            self.notch_offset,
-            self.notch_display_height,
-        );
+        let anchored = anchor_bar_frame(frame, mtm, self.notch_offset, self.notch_display_height);
         debug_display_state("configure-window", Some(&anchored));
         let content_frame = WindowFrame {
             x: 0.0,

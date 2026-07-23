@@ -398,7 +398,11 @@ fn parse_layout_value(value: &Value) -> Option<String> {
 }
 
 #[cfg(test)]
-fn count_windows_in_value(value: &Value, workspace_id: Option<u64>, space_id: Option<u64>) -> usize {
+fn count_windows_in_value(
+    value: &Value,
+    workspace_id: Option<u64>,
+    space_id: Option<u64>,
+) -> usize {
     let windows = match value {
         Value::Array(items) => items.clone(),
         Value::Object(map) => map
@@ -465,11 +469,11 @@ fn apply_workspace_changed(snapshot: &mut RiftSnapshot, payload: &Value) -> Rift
         changed = true;
     }
 
-    if let Some(layout) = layout.filter(|layout| !layout.trim().is_empty()) {
-        if snapshot.layout != layout {
-            snapshot.layout = layout;
-            changed = true;
-        }
+    if let Some(layout) = layout.filter(|layout| !layout.trim().is_empty())
+        && snapshot.layout != layout
+    {
+        snapshot.layout = layout;
+        changed = true;
     }
 
     for workspace in &mut snapshot.workspaces {
@@ -480,7 +484,11 @@ fn apply_workspace_changed(snapshot: &mut RiftSnapshot, payload: &Value) -> Rift
         }
     }
 
-    if !snapshot.workspaces.iter().any(|workspace| workspace.name == current_name) {
+    if !snapshot
+        .workspaces
+        .iter()
+        .any(|workspace| workspace.name == current_name)
+    {
         return RiftApplyResult::RequiresResync;
     }
 
@@ -594,14 +602,12 @@ struct MachClient {
 #[cfg(target_os = "macos")]
 impl MachClient {
     fn connect() -> Result<Self, BarrsError> {
-        let service_name = CString::new(
-            env::var("RIFT_BS_NAME").unwrap_or_else(|_| RIFT_BOOTSTRAP_NAME.into()),
-        )
-        .map_err(|_| BarrsError::Unsupported("invalid Rift bootstrap name".into()))?;
+        let service_name =
+            CString::new(env::var("RIFT_BS_NAME").unwrap_or_else(|_| RIFT_BOOTSTRAP_NAME.into()))
+                .map_err(|_| BarrsError::Unsupported("invalid Rift bootstrap name".into()))?;
         let mut service_port = libc::MACH_PORT_NULL as libc::mach_port_t;
-        let result = unsafe {
-            bootstrap_look_up(bootstrap_port, service_name.as_ptr(), &mut service_port)
-        };
+        let result =
+            unsafe { bootstrap_look_up(bootstrap_port, service_name.as_ptr(), &mut service_port) };
         if result != 0 || service_port == libc::MACH_PORT_NULL as libc::mach_port_t {
             return Err(BarrsError::Unsupported(
                 "failed to connect to Rift Mach service".into(),
@@ -667,7 +673,9 @@ fn send_json_message(
     payload: &[u8],
 ) -> Result<(), BarrsError> {
     if payload.len() > MACH_PAYLOAD_CAPACITY {
-        return Err(BarrsError::Unsupported("Rift Mach payload exceeds 16KB".into()));
+        return Err(BarrsError::Unsupported(
+            "Rift Mach payload exceeds 16KB".into(),
+        ));
     }
     let aligned_len = (payload.len() + 3) & !3;
     let mut message = SimpleMessage {
@@ -713,9 +721,8 @@ fn send_json_message(
 fn receive_response_message(reply_port: libc::mach_port_t) -> Result<Value, BarrsError> {
     let payload = receive_payload(reply_port, Some(RIFT_MACH_TIMEOUT_MS))?;
     let value: Value = serde_json::from_slice(&payload)?;
-    unwrap_response(value).ok_or_else(|| {
-        BarrsError::Unsupported("failed to decode Rift Mach response".into())
-    })
+    unwrap_response(value)
+        .ok_or_else(|| BarrsError::Unsupported("failed to decode Rift Mach response".into()))
 }
 
 #[cfg(target_os = "macos")]
@@ -778,13 +785,8 @@ fn receive_payload(
 #[cfg(target_os = "macos")]
 fn allocate_reply_port() -> Result<libc::mach_port_t, BarrsError> {
     let mut port = libc::MACH_PORT_NULL as libc::mach_port_t;
-    let result = unsafe {
-        mach_port_allocate(
-            mach_task_self_port(),
-            MACH_PORT_RIGHT_RECEIVE,
-            &mut port,
-        )
-    };
+    let result =
+        unsafe { mach_port_allocate(mach_task_self_port(), MACH_PORT_RIGHT_RECEIVE, &mut port) };
     if result != 0 {
         return Err(BarrsError::Unsupported(format!(
             "failed to allocate Mach reply port ({result})"
