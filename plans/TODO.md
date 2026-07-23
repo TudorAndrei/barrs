@@ -25,13 +25,13 @@ commit succeeds.
 
 - [x] Complete `plans/004-harden-ipc-framing-and-concurrency.md`.
 - [x] Oversized/silent-client regressions pass.
-- [ ] Commit: `fix(ipc): bound frames and isolate slow clients` (pending this phase's commit)
+- [x] Commit: `fix(ipc): bound frames and isolate slow clients`
 
 ## Phase 5: Startup lifecycle
 
-- [ ] Complete `plans/005-make-startup-single-instance-and-ready.md`.
-- [ ] Concurrent/live/invalid/ready startup cases pass.
-- [ ] Commit: `fix(daemon): enforce single-instance ready startup`
+- [x] Complete `plans/005-make-startup-single-instance-and-ready.md`.
+- [x] Concurrent/live/invalid/ready startup cases pass.
+- [ ] Commit: `fix(daemon): enforce single-instance ready startup` (pending this phase's commit)
 
 ## Phase 6: Reload reconciliation
 

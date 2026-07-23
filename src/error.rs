@@ -10,6 +10,10 @@ pub enum BarrsError {
     Json(#[from] serde_json::Error),
     #[error("daemon is not running")]
     DaemonUnavailable,
+    #[error("barrs daemon is already running")]
+    DaemonAlreadyRunning,
+    #[error("daemon startup failed: {0}")]
+    DaemonStartupFailed(String),
     #[error("daemon rejected request: {0}")]
     DaemonRejected(String),
     #[error("invalid config: {0}")]

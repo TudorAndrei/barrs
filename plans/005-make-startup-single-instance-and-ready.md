@@ -88,13 +88,13 @@ initialization failure, readiness timeout, and graceful Stop cleanup.
 
 ## Done criteria
 
-- [ ] A live socket is never unlinked.
-- [ ] Concurrent startup yields one initialized renderer.
-- [ ] Detached success means the new daemon is responsive.
-- [ ] Startup failures reach the parent and return nonzero.
-- [ ] Foreground development behavior remains intact.
-- [ ] `git status --short` lists only scoped files and the plan status update.
-- [ ] `plans/README.md` row is updated.
+- [x] A live socket is never unlinked.
+- [x] Concurrent startup yields one initialized renderer.
+- [x] Detached success means the new daemon is responsive.
+- [x] Startup failures reach the parent and return nonzero.
+- [x] Foreground development behavior remains intact.
+- [x] `git status --short` lists only scoped files and the plan status update.
+- [x] `plans/README.md` row is updated.
 
 ## STOP conditions
 

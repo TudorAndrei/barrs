@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::env;
 use std::fs;
+use std::io::{ErrorKind, Write};
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,7 +14,9 @@ use tokio::time::{self, Duration, Instant};
 
 use crate::config::{Config, ItemConfig, PluginKind, load_config_with_runtime};
 use crate::error::BarrsError;
-use crate::ipc::{EventPayload, Request, Response, read_request_frame, write_response};
+use crate::ipc::{
+    EventPayload, Request, Response, read_request_frame, send_request, write_response,
+};
 use crate::plugin::from_item_config;
 use crate::render::{RenderItemSnapshot, Renderer};
 use crate::rift::{
@@ -116,14 +120,16 @@ impl<R: Renderer> Daemon<R> {
     }
 
     pub async fn run(mut self) -> Result<(), BarrsError> {
-        self.refresh_all_items().await?;
-
         let socket_path = {
             let state = self.state.lock().await;
             state.config.socket_path()
         };
-        cleanup_socket(&socket_path)?;
-        let listener = UnixListener::bind(&socket_path)?;
+        let listener = bind_daemon_socket(&socket_path).await?;
+        if let Err(error) = self.refresh_all_items().await {
+            cleanup_socket(&socket_path)?;
+            return Err(error);
+        }
+        signal_startup_ready();
         let (request_sender, mut request_receiver) = mpsc::channel(PENDING_IPC_REQUESTS);
         let mut event_tick = time::interval(Duration::from_millis(EVENT_TICK_MS));
         let mut poll_tick = time::interval(Duration::from_millis(POLL_TICK_MS));
@@ -541,6 +547,50 @@ fn cleanup_socket(path: &Path) -> Result<(), BarrsError> {
         "refusing to remove non-socket path {}",
         path.display()
     )))
+}
+
+async fn bind_daemon_socket(path: &Path) -> Result<UnixListener, BarrsError> {
+    if path.exists() {
+        reclaim_stale_socket(path).await?;
+    }
+    match UnixListener::bind(path) {
+        Ok(listener) => Ok(listener),
+        Err(error) if error.kind() == ErrorKind::AddrInUse => {
+            reclaim_stale_socket(path).await?;
+            UnixListener::bind(path).map_err(BarrsError::from)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn reclaim_stale_socket(path: &Path) -> Result<(), BarrsError> {
+    let file_type = fs::symlink_metadata(path)?.file_type();
+    if !file_type.is_socket() {
+        return Err(BarrsError::InvalidConfig(format!(
+            "refusing to remove non-socket path {}",
+            path.display()
+        )));
+    }
+    match time::timeout(
+        Duration::from_millis(250),
+        send_request(path, &Request::Ping),
+    )
+    .await
+    {
+        Ok(Ok(Response::Pong)) => return Err(BarrsError::DaemonAlreadyRunning),
+        Ok(Ok(_)) => return Err(BarrsError::DaemonAlreadyRunning),
+        Ok(Err(BarrsError::DaemonUnavailable)) | Err(_) => {}
+        Ok(Err(error)) => return Err(error),
+    }
+    fs::remove_file(path)?;
+    Ok(())
+}
+
+fn signal_startup_ready() {
+    if env::var_os("BARRS_STARTUP_READY").is_some() {
+        let _ = std::io::stdout().write_all(b"barrs-ready\n");
+        let _ = std::io::stdout().flush();
+    }
 }
 
 fn build_refresh_deadlines(
@@ -1288,6 +1338,67 @@ return {{
         super::cleanup_socket(&socket_path).expect("cleanup socket");
 
         assert!(!socket_path.exists());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_socket_is_reclaimed_before_binding() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("barrs.sock");
+        let stale = std::os::unix::net::UnixListener::bind(&socket_path).expect("bind socket");
+        drop(stale);
+
+        let listener = super::bind_daemon_socket(&socket_path)
+            .await
+            .expect("reclaim stale socket");
+
+        assert!(socket_path.exists());
+        drop(listener);
+        super::cleanup_socket(&socket_path).expect("cleanup socket");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn live_daemon_is_not_replaced_or_initialized_twice() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("barrs.sock");
+        let config_path = dir.path().join("barrs.lua");
+        write_config(&config_path, &socket_path);
+
+        let config = load_config(&config_path).expect("config");
+        let first = Daemon::new(config_path.clone(), config, NoopRenderer::default())
+            .expect("first daemon");
+        let first_task: JoinHandle<Result<(), crate::error::BarrsError>> =
+            tokio::spawn(first.run());
+        wait_for_socket(&socket_path).await;
+
+        let second_renders = Arc::new(AtomicUsize::new(0));
+        let second = Daemon::new(
+            config_path.clone(),
+            load_config(&config_path).expect("config"),
+            CountingRenderer {
+                renders: Arc::clone(&second_renders),
+            },
+        )
+        .expect("second daemon");
+        let error = second.run().await.expect_err("live daemon must win");
+        assert!(matches!(
+            error,
+            crate::error::BarrsError::DaemonAlreadyRunning
+        ));
+        assert_eq!(second_renders.load(Ordering::SeqCst), 0);
+
+        assert!(matches!(
+            send_request(&socket_path, &Request::Ping)
+                .await
+                .expect("ping"),
+            Response::Pong
+        ));
+        assert!(matches!(
+            send_request(&socket_path, &Request::Stop)
+                .await
+                .expect("stop"),
+            Response::Ok { .. }
+        ));
+        first_task.await.expect("join").expect("daemon result");
     }
 
     #[test]

@@ -1,7 +1,10 @@
 use std::env;
 use std::fs;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -143,8 +146,9 @@ fn spawn_background_process(args: RunArgs) -> Result<(), BarrsError> {
             crate::render::RendererKind::Noop => "noop",
         })
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("BARRS_STARTUP_READY", "1");
     if let Some(config) = args.config {
         command.arg("--config").arg(config);
     }
@@ -160,8 +164,64 @@ fn spawn_background_process(args: RunArgs) -> Result<(), BarrsError> {
             Ok(())
         });
     }
-    command.spawn()?;
-    Ok(())
+    let mut child = command.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| BarrsError::DaemonStartupFailed("could not read child readiness".into()))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| BarrsError::DaemonStartupFailed("could not read child stderr".into()))?;
+    let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let result = BufReader::new(stdout)
+            .read_line(&mut line)
+            .map(|_| line.trim_end().to_owned());
+        let _ = ready_sender.send(result);
+    });
+
+    match ready_receiver.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(line)) if line == "barrs-ready" => Ok(()),
+        Ok(Ok(line)) => Err(startup_failure(
+            &mut child,
+            &mut stderr,
+            format!("unexpected readiness message {line:?}"),
+        )),
+        Ok(Err(error)) => Err(startup_failure(
+            &mut child,
+            &mut stderr,
+            format!("failed to read readiness: {error}"),
+        )),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(startup_failure(
+            &mut child,
+            &mut stderr,
+            "timed out waiting for daemon readiness".into(),
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(startup_failure(
+            &mut child,
+            &mut stderr,
+            "daemon exited before reporting readiness".into(),
+        )),
+    }
+}
+
+fn startup_failure(
+    child: &mut std::process::Child,
+    stderr: &mut impl Read,
+    detail: String,
+) -> BarrsError {
+    let _ = child.kill();
+    let _ = child.wait();
+    let mut child_stderr = String::new();
+    let _ = stderr.read_to_string(&mut child_stderr);
+    let child_stderr = child_stderr.trim();
+    if child_stderr.is_empty() {
+        BarrsError::DaemonStartupFailed(detail)
+    } else {
+        BarrsError::DaemonStartupFailed(format!("{detail}: {child_stderr}"))
+    }
 }
 
 fn socket_or_default(path: Option<PathBuf>) -> PathBuf {
