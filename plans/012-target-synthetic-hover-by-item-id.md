@@ -79,12 +79,12 @@ coordinates over another item, `(0,0)`, enter/update/leave, and unknown ID.
 
 ## Done criteria
 
-- [ ] Synthetic hover targets the requested ID.
-- [ ] Native pointer hover behavior is unchanged.
-- [ ] Unknown IDs are rejected.
-- [ ] Full gate passes.
-- [ ] `git status --short` lists only scoped files and the plan status update.
-- [ ] `plans/README.md` row is updated.
+- [x] Synthetic hover targets the requested ID.
+- [x] Native pointer hover behavior is unchanged.
+- [x] Unknown IDs are rejected.
+- [x] Full gate passes.
+- [x] `git status --short` lists only scoped files and the plan status update.
+- [x] `plans/README.md` row is updated.
 
 ## STOP conditions
 

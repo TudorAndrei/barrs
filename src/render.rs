@@ -556,7 +556,11 @@ impl NativeSurfaceState {
         let previous = self.active_hover_item.clone();
         match event.event {
             EventKind::HoverEnter | EventKind::HoverUpdate => {
-                self.active_hover_item = self.item_at(event.mouse.x as f64, event.mouse.y as f64);
+                // Native pointer discovery has already hit-tested coordinates and
+                // CLI triggers supply a validated item ID. In either case, the
+                // resolved identity is authoritative; mouse coordinates are only
+                // contextual event data.
+                self.active_hover_item = Some(event.item_id.clone());
             }
             EventKind::HoverLeave
                 if self.active_hover_item.as_deref() == Some(event.item_id.as_str()) =>
@@ -566,13 +570,6 @@ impl NativeSurfaceState {
             _ => {}
         }
         self.active_hover_item != previous
-    }
-
-    fn item_at(&self, x: f64, y: f64) -> Option<String> {
-        self.items
-            .iter()
-            .find(|item| item.frame.contains(x, y))
-            .map(|item| item.snapshot.id.clone())
     }
 
     fn scene(&self) -> BarScene {
@@ -2364,6 +2361,63 @@ mod tests {
         assert_eq!(state.items.len(), 1);
         assert_eq!(state.active_hover_item.as_deref(), Some("cpu"));
         assert!(state.items[0].frame.width > 0.0);
+    }
+
+    #[test]
+    fn synthetic_hover_targets_the_requested_item_id() {
+        let mut renderer = NativeRenderer::new(Box::new(MockNativeHost::default()));
+        renderer
+            .initialize(&Config::default())
+            .expect("initialize renderer");
+        renderer
+            .render_item(&test_snapshot("a", 0, Some("left"), "A"))
+            .expect("render first item");
+        renderer
+            .render_item(&test_snapshot("b", 1, Some("left"), "B"))
+            .expect("render second item");
+
+        let a_frame = renderer
+            .surface_state()
+            .items
+            .iter()
+            .find(|item| item.snapshot.id == "a")
+            .expect("first item frame")
+            .frame
+            .clone();
+        let mut hover_enter =
+            EventPayload::from_trigger("b".into(), crate::cli::TriggerEvent::HoverEnter);
+        hover_enter.mouse = MouseState {
+            x: (a_frame.x + 1.0).round() as i32,
+            y: 1,
+            ..MouseState::default()
+        };
+
+        renderer
+            .handle_event(&hover_enter)
+            .expect("enter target item");
+        assert_eq!(
+            renderer.surface_state().active_hover_item.as_deref(),
+            Some("b")
+        );
+
+        let mut hover_update =
+            EventPayload::from_trigger("b".into(), crate::cli::TriggerEvent::HoverUpdate);
+        hover_update.mouse = hover_enter.mouse.clone();
+        renderer
+            .handle_event(&hover_update)
+            .expect("update target item");
+        assert_eq!(
+            renderer.surface_state().active_hover_item.as_deref(),
+            Some("b")
+        );
+
+        let mut hover_leave =
+            EventPayload::from_trigger("b".into(), crate::cli::TriggerEvent::HoverLeave);
+        hover_leave.mouse = hover_enter.mouse;
+        renderer
+            .handle_event(&hover_leave)
+            .expect("leave target item");
+        assert_eq!(renderer.surface_state().active_hover_item, None);
     }
 
     #[test]

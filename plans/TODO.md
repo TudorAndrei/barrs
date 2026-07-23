@@ -67,12 +67,12 @@ commit succeeds.
 
 - [x] Complete `plans/011-preserve-rift-window-counts.md`.
 - [x] Counts 0, 1, and 3 remain exact across workspace switches.
-- [ ] Commit: `fix(rift): preserve workspace window counts`
+- [x] Commit: `fix(rift): preserve workspace window counts`
 
 ## Phase 12: Synthetic hover
 
-- [ ] Complete `plans/012-target-synthetic-hover-by-item-id.md`.
-- [ ] Enter/update/leave target the requested ID; unknown IDs fail.
+- [x] Complete `plans/012-target-synthetic-hover-by-item-id.md`.
+- [x] Enter/update/leave target the requested ID; unknown IDs fail.
 - [ ] Commit: `fix(render): honor synthetic hover item targets`
 
 ## Phase 13: Release documentation

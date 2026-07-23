@@ -23,7 +23,7 @@ is in [TODO.md](./TODO.md).
 | 009 | Clear Rift terminal dirty state | Finding 9 | P2 | S | 002 | DONE |
 | 010 | Elide unchanged hover publications | Finding 10 | P2 | S | 006 | DONE |
 | 011 | Preserve Rift window counts | Finding 12 | P2 | M | 002 | DONE |
-| 012 | Target synthetic hover by item ID | Finding 13 | P2 | S | 003, 006 | TODO |
+| 012 | Target synthetic hover by item ID | Finding 13 | P2 | S | 003, 006 | DONE |
 | 013 | Align release documentation | Finding 15 | P2 | S | 001 | TODO |
 | 014 | Document Lua handler contract | Finding 16 | P2 | S | 003, 012 | TODO |
 | 015 | Spike Lua snapshot providers | Direction 1 | P3 | M | 008, 014 | TODO |

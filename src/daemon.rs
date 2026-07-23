@@ -1679,7 +1679,7 @@ return {{
         let error = daemon
             .dispatch_event(crate::ipc::EventPayload::from_trigger(
                 "missing".into(),
-                crate::cli::TriggerEvent::Click,
+                crate::cli::TriggerEvent::HoverEnter,
             ))
             .await
             .expect_err("unknown item should fail");
