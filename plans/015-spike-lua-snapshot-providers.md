@@ -85,12 +85,12 @@ placeholder output, and a slow provider that does not block UI work.
 
 ## Done criteria
 
-- [ ] Decision document exists and is self-contained.
-- [ ] Main-thread latency and Lua ownership are resolved or marked blockers.
-- [ ] Future implementation phases have exact source/test targets.
-- [ ] No production code changed.
-- [ ] `git status --short` lists only the spike document and plan status update.
-- [ ] `plans/README.md` row is updated.
+- [x] Decision document exists and is self-contained.
+- [x] Main-thread latency and Lua ownership are resolved or marked blockers.
+- [x] Future implementation phases have exact source/test targets.
+- [x] No production code changed.
+- [x] `git status --short` lists only the spike document and plan status update.
+- [x] `plans/README.md` row is updated.
 
 ## STOP conditions
 

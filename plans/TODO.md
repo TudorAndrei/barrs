@@ -85,12 +85,12 @@ commit succeeds.
 
 - [x] Complete `plans/014-document-lua-handler-contract.md`.
 - [x] Handler/context/return/error contract and sample are accurate.
-- [ ] Commit: `docs(config): define lua handler contract`
+- [x] Commit: `docs(config): define lua handler contract`
 
 ## Phase 15: Lua provider spike
 
-- [ ] Complete `plans/015-spike-lua-snapshot-providers.md`.
-- [ ] Design document resolves or blocks execution/runtime semantics.
+- [x] Complete `plans/015-spike-lua-snapshot-providers.md`.
+- [x] Design document resolves or blocks execution/runtime semantics.
 - [ ] Commit: `docs(design): specify lua snapshot providers`
 
 ## Phase 16: Display targeting spike
