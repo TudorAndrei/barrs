@@ -77,12 +77,12 @@ signature, failed resync, later recovery, and subscription changes on reload.
 
 ## Done criteria
 
-- [ ] No-consumer and equal-signature cycles terminate.
-- [ ] A later real change is not suppressed.
-- [ ] Reload adds/removes subscriptions with Rift consumers.
-- [ ] Full gate passes.
-- [ ] `git status --short` lists only scoped files and the plan status update.
-- [ ] `plans/README.md` row is updated.
+- [x] No-consumer and equal-signature cycles terminate.
+- [x] A later real change is not suppressed.
+- [x] Reload adds/removes subscriptions with Rift consumers.
+- [x] Full gate passes.
+- [x] `git status --short` lists only scoped files and the plan status update.
+- [x] `plans/README.md` row is updated.
 
 ## STOP conditions
 

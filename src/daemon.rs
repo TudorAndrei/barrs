@@ -102,13 +102,14 @@ impl<R: Renderer> Daemon<R> {
     ) -> Result<Self, BarrsError> {
         let backend = select_backend();
         let backend_kind = backend.kind();
+        let rift_subscription = rift_subscription_for(&config);
         let state = DaemonState {
             refresh_deadlines: build_refresh_deadlines(&config, Instant::now(), backend_kind),
             config,
             config_epoch: 0,
             lua,
             backend: backend_kind,
-            rift_subscription: subscribe(),
+            rift_subscription,
             rift_snapshot: None,
             rift_dirty: false,
             rift_debounce_deadline: None,
@@ -262,7 +263,7 @@ impl<R: Renderer> Daemon<R> {
         state.lua = lua;
         state.refresh_deadlines =
             build_refresh_deadlines(&state.config, Instant::now(), state.backend);
-        state.rift_subscription = subscribe();
+        state.rift_subscription = rift_subscription_for(&state.config);
         state.rift_snapshot = None;
         state.rift_dirty = false;
         state.rift_debounce_deadline = None;
@@ -437,10 +438,14 @@ impl<R: Renderer> Daemon<R> {
         drop(state);
 
         if item_ids.is_empty() {
+            let mut state = self.state.lock().await;
+            finish_rift_debounce(&mut state);
             return Ok(());
         }
 
         let Some(rift_snapshot) = rift_snapshot else {
+            let mut state = self.state.lock().await;
+            finish_rift_debounce(&mut state);
             return Ok(());
         };
         let next_signature = rift_snapshot.signature();
@@ -449,6 +454,8 @@ impl<R: Renderer> Daemon<R> {
             state.last_rift_signature
         };
         if !rift_signature_changed(last_signature, next_signature) {
+            let mut state = self.state.lock().await;
+            finish_rift_debounce(&mut state);
             return Ok(());
         }
 
@@ -456,8 +463,7 @@ impl<R: Renderer> Daemon<R> {
             .await?;
 
         let mut state = self.state.lock().await;
-        state.rift_dirty = false;
-        state.rift_debounce_deadline = None;
+        finish_rift_debounce(&mut state);
         state.last_rift_signature = Some(next_signature);
         Ok(())
     }
@@ -709,6 +715,19 @@ fn is_rift_item(item: &ItemConfig) -> bool {
     )
 }
 
+fn rift_subscription_for(config: &Config) -> Option<RiftSubscription> {
+    has_rift_items(config).then(subscribe).flatten()
+}
+
+fn has_rift_items(config: &Config) -> bool {
+    config.items.iter().any(is_rift_item)
+}
+
+fn finish_rift_debounce<R: Renderer>(state: &mut DaemonState<R>) {
+    state.rift_dirty = false;
+    state.rift_debounce_deadline = None;
+}
+
 fn refresh_needs_rift(config: &Config, due_items: &[String]) -> bool {
     config
         .items
@@ -931,6 +950,22 @@ return {{
 return {{
   socket_path = "{}",
   items = {{ {items} }}
+}}
+"#,
+                socket_path.display()
+            ),
+        )
+        .expect("write config");
+    }
+
+    fn write_rift_config(path: &Path, socket_path: &Path) {
+        fs::write(
+            path,
+            format!(
+                r#"
+return {{
+  socket_path = "{}",
+  items = {{ {{ id = "workspaces", plugin = {{ kind = "rift_workspaces" }} }} }}
 }}
 "#,
                 socket_path.display()
@@ -1453,6 +1488,88 @@ return {{
             .await
             .expect("handler");
         assert_eq!(fs::read_to_string(&handler_path).expect("handler"), "2");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rift_debounce_clears_when_no_items_consume_rift() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("barrs.sock");
+        let config_path = dir.path().join("barrs.lua");
+        write_config(&config_path, &socket_path);
+        let config = load_config(&config_path).expect("config");
+        assert!(!super::has_rift_items(&config));
+        let mut daemon =
+            Daemon::new(config_path.clone(), config, NoopRenderer::default()).expect("daemon");
+        {
+            let mut state = daemon.state.lock().await;
+            state.rift_dirty = true;
+            state.rift_debounce_deadline = Some(tokio::time::Instant::now());
+            state.rift_snapshot = Some(test_rift_snapshot("one"));
+        }
+
+        daemon.process_rift_events().await.expect("process events");
+
+        let state = daemon.state.lock().await;
+        assert!(!state.rift_dirty);
+        assert_eq!(state.rift_debounce_deadline, None);
+        assert!(state.rift_subscription.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rift_debounce_clears_equal_signatures_and_allows_later_change() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("barrs.sock");
+        let config_path = dir.path().join("barrs.lua");
+        write_rift_config(&config_path, &socket_path);
+        let config = load_config(&config_path).expect("config");
+        assert!(super::has_rift_items(&config));
+        let mut daemon =
+            Daemon::new(config_path.clone(), config, NoopRenderer::default()).expect("daemon");
+        let initial = test_rift_snapshot("one");
+        {
+            let mut state = daemon.state.lock().await;
+            state.rift_snapshot = Some(initial.clone());
+            state.last_rift_signature = Some(initial.signature());
+            state.rift_dirty = true;
+            state.rift_debounce_deadline = Some(tokio::time::Instant::now());
+        }
+
+        daemon.process_rift_events().await.expect("equal signature");
+        {
+            let state = daemon.state.lock().await;
+            assert!(!state.rift_dirty);
+            assert_eq!(state.rift_debounce_deadline, None);
+        }
+
+        let changed = test_rift_snapshot("two");
+        {
+            let mut state = daemon.state.lock().await;
+            state.rift_snapshot = Some(changed.clone());
+            state.rift_dirty = true;
+            state.rift_debounce_deadline = Some(tokio::time::Instant::now());
+        }
+        daemon
+            .process_rift_events()
+            .await
+            .expect("changed signature");
+
+        let state = daemon.state.lock().await;
+        assert!(!state.rift_dirty);
+        assert_eq!(state.rift_debounce_deadline, None);
+        assert_eq!(state.last_rift_signature, Some(changed.signature()));
+    }
+
+    fn test_rift_snapshot(current_workspace: &str) -> crate::rift::RiftSnapshot {
+        crate::rift::RiftSnapshot {
+            current_workspace: current_workspace.into(),
+            workspaces: vec![crate::rift::RiftWorkspace {
+                name: current_workspace.into(),
+                is_current: true,
+                has_windows: true,
+            }],
+            layout: "tiling".into(),
+            window_count: 1,
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

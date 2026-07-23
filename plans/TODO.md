@@ -49,13 +49,13 @@ commit succeeds.
 
 - [x] Complete `plans/008-evaluate-lua-config-once.md`.
 - [x] Startup/reload each evaluate Lua exactly once.
-- [ ] Commit: `fix(config): evaluate lua once per load` (pending this phase's commit)
+- [x] Commit: `fix(config): evaluate lua once per load`
 
 ## Phase 9: Rift terminal state
 
-- [ ] Complete `plans/009-clear-rift-debounce-terminal-state.md`.
-- [ ] No-consumer/equal-signature regression tests pass.
-- [ ] Commit: `fix(rift): finish no-op debounce cycles`
+- [x] Complete `plans/009-clear-rift-debounce-terminal-state.md`.
+- [x] No-consumer/equal-signature regression tests pass.
+- [ ] Commit: `fix(rift): finish no-op debounce cycles` (pending this phase's commit)
 
 ## Phase 10: Hover publication
 
