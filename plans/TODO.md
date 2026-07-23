@@ -91,12 +91,12 @@ commit succeeds.
 
 - [x] Complete `plans/015-spike-lua-snapshot-providers.md`.
 - [x] Design document resolves or blocks execution/runtime semantics.
-- [ ] Commit: `docs(design): specify lua snapshot providers`
+- [x] Commit: `docs(design): specify lua snapshot providers`
 
 ## Phase 16: Display targeting spike
 
-- [ ] Complete `plans/016-spike-display-targeting.md`.
-- [ ] Selector, fallback, transition matrix, and compatibility are specified.
+- [x] Complete `plans/016-spike-display-targeting.md`.
+- [x] Selector, fallback, transition matrix, and compatibility are specified.
 - [ ] Commit: `docs(design): specify display targeting`
 
 ## Phase 17: Doctor command design

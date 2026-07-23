@@ -83,12 +83,12 @@ external, mirrored, removed, returned, reordered, and no-match displays.
 
 ## Done criteria
 
-- [ ] Selector identity and fallback behavior are unambiguous.
-- [ ] Hotplug state transitions and test matrix are specified.
-- [ ] Existing configs retain current main-display behavior.
-- [ ] No production code changed.
-- [ ] `git status --short` lists only the spike document and plan status update.
-- [ ] `plans/README.md` row is updated.
+- [x] Selector identity and fallback behavior are unambiguous.
+- [x] Hotplug state transitions and test matrix are specified.
+- [x] Existing configs retain current main-display behavior.
+- [x] No production code changed.
+- [x] `git status --short` lists only the spike document and plan status update.
+- [x] `plans/README.md` row is updated.
 
 ## STOP conditions
 
