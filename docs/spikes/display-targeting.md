@@ -1,3 +1,12 @@
+---
+id: SPIKE-DISPLAY-TARGETING
+kind: doc
+tags:
+  - spike
+  - display
+  - renderer
+---
+
 # Display targeting: design decision
 
 ## Decision

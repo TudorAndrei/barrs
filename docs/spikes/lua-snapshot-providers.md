@@ -1,3 +1,12 @@
+---
+id: SPIKE-LUA-SNAPSHOT-PROVIDERS
+kind: doc
+tags:
+  - spike
+  - lua
+  - plugins
+---
+
 # Lua snapshot providers: design decision
 
 ## Decision

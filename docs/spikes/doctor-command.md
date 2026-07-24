@@ -1,3 +1,12 @@
+---
+id: SPIKE-DOCTOR-COMMAND
+kind: doc
+tags:
+  - spike
+  - cli
+  - diagnostics
+---
+
 # `barrs doctor`: diagnostic command design
 
 ## Decision and boundaries

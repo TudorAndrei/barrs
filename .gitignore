@@ -27,3 +27,4 @@ target
 
 # Claude Code local settings
 /.claude/
+.criv/
