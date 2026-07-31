@@ -2,7 +2,8 @@
 
 ## Release policy
 
-- Do not create release tags manually when the Cargo package version has not been updated.
+- Do not create release tags manually when the Cargo package version has not
+  been updated.
 - The git tag and the Rust crate version must match.
 - Releases derive their SemVer version from conventional commits with Cocogitto.
 - Use the `mise` release flow; it invokes `cargo-release` internally instead of
@@ -32,7 +33,8 @@
 
 - `release.toml` defines the release behavior for this repository.
 - Tags must be created as `v{{version}}`.
-- `cargo publish` is disabled because releases are distributed through GitHub artifacts and Homebrew, not crates.io.
+- `cargo publish` is disabled because releases are distributed through GitHub
+  artifacts and Homebrew, not crates.io.
 
 ## Version checks
 
@@ -42,4 +44,5 @@
   cargo run -- --version
   ```
 
-- The printed version must match the derived release version and `v{{version}}` tag.
+- The printed version must match the derived release version and
+  `v{{version}}` tag.

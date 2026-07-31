@@ -2,7 +2,7 @@
 id: ADR-0003
 kind: decision
 title: Provide a redacted read-only doctor command
-status: proposed
+status: accepted
 date: 2026-07-23
 governs:
   - src/app.rs

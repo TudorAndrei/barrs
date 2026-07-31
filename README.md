@@ -2,7 +2,10 @@
 
 `barrs` is a native macOS status bar for Rift.
 
-It is built as a lightweight bar daemon with a Rust core, a native AppKit renderer, built-in system plugins, and direct Rift integration. The current focus is a practical top bar for daily use on macOS rather than SketchyBar compatibility.
+It is built as a lightweight bar daemon with a Rust core, a native AppKit
+renderer, built-in system plugins, and direct Rift integration. The current
+focus is a practical top bar for daily use on macOS rather than SketchyBar
+compatibility.
 
 ## Features
 
@@ -22,7 +25,8 @@ It is built as a lightweight bar daemon with a Rust core, a native AppKit render
 
 ### Homebrew
 
-This repository can be used as a tap. Because the repository is named `barrs` rather than `homebrew-barrs`, use the explicit URL form:
+This repository can be used as a tap. Because the repository is named `barrs`
+rather than `homebrew-barrs`, use the explicit URL form:
 
 ```bash
 brew tap TudorAndrei/barrs https://github.com/TudorAndrei/barrs
@@ -81,7 +85,8 @@ For development, run it directly from the repository:
 cargo run -- start --config barrs.lua
 ```
 
-In debug builds, `start` stays attached to the terminal so you can iterate without a detached background process.
+In debug builds, `start` stays attached to the terminal so you can iterate
+without a detached background process.
 
 ## Configuration
 
@@ -116,7 +121,11 @@ Items can be placed in three sections with `placement`:
 - `middle` or `center`
 - `right`
 
-Omitting `placement` defaults to `left`. Left items flow from the left edge, right items flow inward from the right edge, and middle/center items are centered in the available bar space. On built-in Mac displays with a notch, middle items are split around the reserved notch gap so they do not render under the notch.
+Omitting `placement` defaults to `left`. Left items flow from the left edge,
+right items flow inward from the right edge, and middle/center items are
+centered in the available bar space. On built-in Mac displays with a notch,
+middle items are split around the reserved notch gap so they do not render under
+the notch.
 
 ### Lua event handlers
 
@@ -140,7 +149,12 @@ Each function receives one `ctx` table:
   event = "click",
   timestamp_ms = 0,
   mouse = { x = 0, y = 0, button = nil, scroll_delta = nil },
-  modifiers = { shift = false, control = false, option = false, command = false },
+  modifiers = {
+    shift = false,
+    control = false,
+    option = false,
+    command = false,
+  },
 }
 ```
 
@@ -173,9 +187,16 @@ bar = {
 }
 ```
 
-`notch_width` is the physical horizontal notch width used on notched built-in displays. `notch_padding` adds clearance on each side of that width (default: `8`), preventing icons from sitting flush against or clipping beneath the notch. `notch_offset` shifts the native top bar frame vertically on built-in displays, and `notch_display_height` overrides the bar window height when set to a value greater than `0`.
+`notch_width` is the physical horizontal notch width used on notched built-in
+displays. `notch_padding` adds clearance on each side of that width (default:
+`8`), preventing icons from sitting flush against or clipping beneath the notch.
+`notch_offset` shifts the native top bar frame vertically on built-in displays,
+and `notch_display_height` overrides the bar window height when set to a value
+greater than `0`.
 
-Built-in `time`, `date`, `cpu`, `gpu`, and `battery` items now refresh automatically with sane defaults. Set `interval` on an item to override that default. Example:
+Built-in `time`, `date`, `cpu`, `gpu`, and `battery` items now refresh
+automatically with sane defaults. Set `interval` on an item to override that
+default. Example:
 
 ```lua
 {
@@ -187,7 +208,8 @@ Built-in `time`, `date`, `cpu`, `gpu`, and `battery` items now refresh automatic
 }
 ```
 
-The `date` plugin accepts a raw `strftime` format string. Omit `format` to use `%Y-%m-%d`:
+The `date` plugin accepts a raw `strftime` format string. Omit `format` to use
+`%Y-%m-%d`:
 
 ```lua
 {
@@ -197,7 +219,8 @@ The `date` plugin accepts a raw `strftime` format string. Omit `format` to use `
 }
 ```
 
-The bundled default config also sets explicit intervals for `cpu`, `gpu`, `battery`, `time`, and `date`.
+The bundled default config also sets explicit intervals for `cpu`, `gpu`,
+`battery`, `time`, and `date`.
 
 ## Built-in plugins
 
@@ -225,7 +248,10 @@ barrs item trigger <item-id> <event>
 
 ## Releases
 
-Releases are automated from conventional commits on `main`. Cocogitto derives the next SemVer version; the canonical local flow updates [CHANGELOG.md](./CHANGELOG.md) and Cargo metadata, then uses `cargo-release` to create the release commit and matching `v{{version}}` tag.
+Releases are automated from conventional commits on `main`. Cocogitto derives
+the next SemVer version; the canonical local flow updates
+[CHANGELOG.md](./CHANGELOG.md) and Cargo metadata, then uses `cargo-release` to
+create the release commit and matching `v{{version}}` tag.
 
 Install the local release tooling with `mise`:
 
@@ -250,9 +276,11 @@ This repository uses [release.toml](./release.toml) to:
 - create tags as `v{{version}}`
 - create a release commit before tagging
 - push the branch and tag to `origin`
-- skip `cargo publish`, since GitHub Actions handles packaging and the Homebrew formula update
+- skip `cargo publish`, since GitHub Actions handles packaging and the Homebrew
+  formula update
 
-After the tag is pushed, GitHub Actions builds the macOS archives, publishes the GitHub release assets, and updates `Formula/barrs.rb`.
+After the tag is pushed, GitHub Actions builds the macOS archives, publishes the
+GitHub release assets, and updates `Formula/barrs.rb`.
 
 `release-auto` invokes `cargo-release` internally. Do not run a separate manual
 patch-release flow, hand-edit `Cargo.toml`, or create tags manually.
@@ -262,4 +290,5 @@ patch-release flow, hand-edit `Cargo.toml`, or create tags manually.
 - The bar is top-mounted only.
 - Release installs are designed to run as a service.
 - Development runs stay in the foreground.
-- Rift-backed items use the direct Mach backend when available and fall back to the CLI backend otherwise.
+- Rift-backed items use the direct Mach backend when available and fall back to
+  the CLI backend otherwise.

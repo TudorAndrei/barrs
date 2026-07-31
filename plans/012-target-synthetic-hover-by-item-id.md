@@ -36,7 +36,10 @@ coordinates, usually activating nothing or the wrong item.
 // src/render.rs:510-514
 match event.event {
     EventKind::HoverEnter | EventKind::HoverUpdate => {
-        self.active_hover_item = self.item_at(event.mouse.x as f64, event.mouse.y as f64);
+        self.active_hover_item = self.item_at(
+            event.mouse.x as f64,
+            event.mouse.y as f64,
+        );
     }
 ```
 

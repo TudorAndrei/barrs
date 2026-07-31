@@ -4,7 +4,8 @@
 > the command until its output contract and redaction policy are reviewed.
 >
 > **Drift check (run first)**:
-> `git diff --stat ff4d7df..HEAD -- README.md src/app.rs src/cli.rs src/ipc.rs src/render.rs src/rift.rs`
+> `git diff --stat ff4d7df..HEAD -- README.md src/app.rs src/cli.rs \
+> src/ipc.rs src/render.rs src/rift.rs`
 
 ## Status
 

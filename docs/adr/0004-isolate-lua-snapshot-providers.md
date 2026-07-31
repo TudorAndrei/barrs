@@ -2,7 +2,7 @@
 id: ADR-0004
 kind: decision
 title: Isolate Lua snapshot providers in one executor
-status: proposed
+status: accepted
 date: 2026-07-23
 governs:
   - src/config.rs

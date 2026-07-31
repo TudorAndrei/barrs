@@ -34,7 +34,11 @@ pair one config with a different runtime.
 ```rust
 // src/app.rs:43 and src/daemon.rs:57-58
 let config = config::load_config(&config_path)?;
-pub fn new(config_path: PathBuf, config: Config, renderer: R) -> Result<Self, BarrsError> {
+pub fn new(
+    config_path: PathBuf,
+    config: Config,
+    renderer: R,
+) -> Result<Self, BarrsError> {
     let (_, lua) = load_config_with_runtime(&config_path)?;
 ```
 

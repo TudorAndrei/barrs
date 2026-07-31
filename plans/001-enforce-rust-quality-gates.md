@@ -5,7 +5,8 @@
 > the operator asks.
 >
 > **Drift check (run first)**:
-> `git diff --stat ff4d7df..HEAD -- .github/workflows/ci.yml mise.toml src/daemon.rs src/plugin.rs src/process.rs src/render.rs src/rift.rs`
+> `git diff --stat ff4d7df..HEAD -- .github/workflows/ci.yml mise.toml \
+> src/daemon.rs src/plugin.rs src/process.rs src/render.rs src/rift.rs`
 > If these files have changed, compare the live diagnostics with the current
 > state below. Stop on a material mismatch.
 

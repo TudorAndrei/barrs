@@ -2,7 +2,7 @@
 id: ADR-0002
 kind: decision
 title: Use deterministic targeting for one native bar
-status: proposed
+status: accepted
 date: 2026-07-23
 governs:
   - src/config.rs
