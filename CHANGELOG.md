@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 See [Conventional Commits](https://www.conventionalcommits.org/) for commit guidelines.
 
+## [0.2.5](https://github.com/TudorAndrei/barrs/compare/v0.2.4...v0.2.5) - 2026-08-04
+
+#### Bug Fixes
+- (**render**) fill top screen inset - ([3453c14](https://github.com/TudorAndrei/barrs/commit/3453c1473cdfa8c48c1370c923b2417da59c92fc)) - TudorAndrei
+
+
+
 ## [0.2.4](https://github.com/TudorAndrei/barrs/compare/v0.2.3...v0.2.4) - 2026-07-31
 
 #### Bug Fixes
