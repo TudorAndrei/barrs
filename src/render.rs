@@ -45,8 +45,8 @@ const ITEM_HORIZONTAL_PADDING: f64 = 6.0;
 const CHARACTER_WIDTH: f64 = 9.5;
 const ICON_WIDTH: f64 = 18.0;
 const ICON_TEXT_SPACING: f64 = 6.0;
-const ITEM_LABEL_FONT_SIZE: f64 = 14.0;
-const ITEM_TEXT_HEIGHT: f64 = 18.0;
+const ITEM_LABEL_FONT_SIZE: f64 = 16.0;
+const ITEM_TEXT_HEIGHT: f64 = 24.0;
 const ITEM_TRAILING_TEXT_PADDING: f64 = 0.0;
 const BAR_HEIGHT: f64 = 28.0;
 const DEFAULT_ITEM_SPACING: f64 = 6.0;
@@ -1667,9 +1667,9 @@ fn anchor_bar_frame_for_screen(
     let height = if screen.builtin && notch_display_height > 0 {
         notch_display_height as f64
     } else {
-        frame.height
+        bar_window_height(full_top, visible_top, frame.height)
     };
-    let y = bar_window_y(full_top, visible_top, height);
+    let y = bar_window_y(full_top, height);
     WindowFrame {
         x: screen.full.x,
         y: y + if screen.builtin {
@@ -1682,14 +1682,18 @@ fn anchor_bar_frame_for_screen(
     }
 }
 
-fn bar_window_y(full_top: f64, visible_top: f64, height: f64) -> f64 {
+fn bar_window_height(full_top: f64, visible_top: f64, fallback_height: f64) -> f64 {
     let top_inset = full_top - visible_top;
-    let max_menu_bar_inset = (height * 3.0).max(96.0);
+    let max_menu_bar_inset = (fallback_height * 3.0).max(96.0);
     if top_inset.is_finite() && top_inset > 0.0 && top_inset <= max_menu_bar_inset {
-        visible_top
+        top_inset
     } else {
-        full_top - height
+        fallback_height
     }
+}
+
+fn bar_window_y(full_top: f64, height: f64) -> f64 {
+    full_top - height
 }
 
 fn create_native_host() -> Box<dyn NativeHost> {
@@ -2737,7 +2741,7 @@ mod tests {
             super::anchor_bar_frame_for_screen(&frame, screen, 2, 32),
             super::WindowFrame {
                 x: 1440.0,
-                y: 662.0,
+                y: 670.0,
                 width: 1280.0,
                 height: 32.0,
             }
@@ -2745,7 +2749,7 @@ mod tests {
     }
 
     #[test]
-    fn anchor_bar_frame_ignores_implausible_visible_top_after_hotplug() {
+    fn anchor_bar_frame_uses_the_top_inset_as_its_height() {
         let frame = super::WindowFrame {
             x: 0.0,
             y: 0.0,
@@ -2779,6 +2783,12 @@ mod tests {
                 height: 28.0,
             }
         );
+    }
+
+    #[test]
+    fn bar_window_height_matches_a_plausible_top_inset() {
+        assert_eq!(super::bar_window_height(900.0, 868.0, 28.0), 32.0);
+        assert_eq!(super::bar_window_height(900.0, 170.0, 28.0), 28.0);
     }
 
     struct ChangingLayoutHost {
