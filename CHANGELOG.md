@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 See [Conventional Commits](https://www.conventionalcommits.org/) for commit guidelines.
 
+## [0.2.6](https://github.com/TudorAndrei/barrs/compare/v0.2.5...v0.2.6) - 2026-08-04
+
+### Bug Fixes
+
+- (**release**) pass tag to release workflow - ([7aa7c9d](https://github.com/TudorAndrei/barrs/commit/7aa7c9dd3435bc371893da160664f5fd1d16bb33)) - TudorAndrei
+
 ## [0.2.5](https://github.com/TudorAndrei/barrs/compare/v0.2.4...v0.2.5) - 2026-08-04
 
 ### Bug Fixes
