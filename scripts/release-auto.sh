@@ -80,6 +80,39 @@ previous_changelog_sections() {
   awk 'found || /^## / { found = 1; print }' CHANGELOG.md
 }
 
+format_changelog() {
+  awk '
+    function blank_line() {
+      if (!previous_blank) {
+        print ""
+        previous_blank = 1
+      }
+    }
+
+    /^#### / {
+      sub(/^#### /, "### ")
+    }
+
+    /^### / {
+      blank_line()
+      print
+      print ""
+      previous_blank = 1
+      next
+    }
+
+    /^$/ {
+      blank_line()
+      next
+    }
+
+    {
+      print
+      previous_blank = 0
+    }
+  ' "$1"
+}
+
 write_changelog_entry() {
   local version="$1"
   local tag="$2"
@@ -122,6 +155,8 @@ write_changelog_entry() {
     cat "$existing" >>"$next"
   fi
 
+  format_changelog "$next" >"${next}.formatted"
+  mv "${next}.formatted" "$next"
   mv "$next" CHANGELOG.md
 }
 
@@ -133,7 +168,7 @@ trigger_release_workflow() {
   fi
 
   require_command gh
-  gh workflow run release.yml --ref "$tag"
+  gh workflow run release.yml --ref "$tag" -f "tag=$tag"
 }
 
 require_command cargo
