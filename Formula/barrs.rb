@@ -1,15 +1,15 @@
 class Barrs < Formula
   desc "Native macOS status bar for Rift"
   homepage "https://github.com/TudorAndrei/barrs"
-  version "0.2.6"
+  version "0.2.7"
   license "Apache-2.0"
 
   if Hardware::CPU.arm?
-    url "https://github.com/TudorAndrei/barrs/releases/download/v0.2.6/barrs-v0.2.6-aarch64-apple-darwin.tar.gz"
-    sha256 "d1434c3469366e5fe6092ada297194e470afbaf01cdcb1a84785b7602161ca09"
+    url "https://github.com/TudorAndrei/barrs/releases/download/v0.2.7/barrs-v0.2.7-aarch64-apple-darwin.tar.gz"
+    sha256 "cc471a43972e20878ee8dd4e80c58f25ca725bb5b10196794ede7d0929706730"
   else
-    url "https://github.com/TudorAndrei/barrs/releases/download/v0.2.6/barrs-v0.2.6-x86_64-apple-darwin.tar.gz"
-    sha256 "77ea895a14e90696bfadda42af6463a0fed5e4ac6c335e39f30a33ed8c920e85"
+    url "https://github.com/TudorAndrei/barrs/releases/download/v0.2.7/barrs-v0.2.7-x86_64-apple-darwin.tar.gz"
+    sha256 "d9d7430c46e6d51b46897db504e3ef0adeb51ad93facf8ea9b3ea7dd099b79d1"
   end
 
   def install
