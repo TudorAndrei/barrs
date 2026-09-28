@@ -6,7 +6,7 @@
   been updated.
 - The git tag and the Rust crate version must match.
 - Releases derive their SemVer version from conventional commits with Cocogitto.
-- Use the `mise` release flow; it invokes `cargo-release` internally instead of
+- Use the `mise` release flow; it runs `cog bump --auto` instead of
   hand-editing `Cargo.toml` or manually tagging.
 
 ## Standard release flow
@@ -23,25 +23,27 @@
    mise run release-auto
    ```
 
-   The script derives the version, updates the changelog and Cargo metadata,
-   verifies the binary version, and uses `cargo-release` to commit, create the
-   matching `v{{version}}` tag, and push.
+   Cocogitto derives the version, runs the pre-bump hooks in `cog.toml`
+   (Cargo version, tests, binary version check), writes the changelog, commits
+   `chore(version): v{{version}}`, creates the matching `v{{version}}` tag, and
+   pushes.
 
 3. Let GitHub Actions build release artifacts and update `Formula/barrs.rb`.
 
 ## Configuration
 
-- `release.toml` defines the release behavior for this repository.
+- `cog.toml` defines the release behavior for this repository.
+- `.cog/changelog.tera` is the changelog template.
 - Tags must be created as `v{{version}}`.
-- `cargo publish` is disabled because releases are distributed through GitHub
-  artifacts and Homebrew, not crates.io.
+- Nothing is published to crates.io; releases are distributed through GitHub
+  artifacts and Homebrew.
 
 ## Version checks
 
-- The release automation verifies before committing/tagging:
+- A pre-bump hook verifies before committing/tagging:
 
   ```bash
-  cargo run -- --version
+  cargo run -- --version | grep -Fx 'barrs {{version}}'
   ```
 
 - The printed version must match the derived release version and

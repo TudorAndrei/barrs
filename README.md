@@ -248,10 +248,10 @@ barrs item trigger <item-id> <event>
 
 ## Releases
 
-Releases are automated from conventional commits on `main`. Cocogitto derives
-the next SemVer version; the canonical local flow updates
-[CHANGELOG.md](./CHANGELOG.md) and Cargo metadata, then uses `cargo-release` to
-create the release commit and matching `v{{version}}` tag.
+Releases are automated from conventional commits on `main` with
+`cog bump --auto`. Cocogitto derives the next SemVer version, updates
+[CHANGELOG.md](./CHANGELOG.md) and Cargo metadata, and creates the release
+commit and matching `v{{version}}` tag.
 
 Install the local release tooling with `mise`:
 
@@ -271,19 +271,15 @@ From a clean `main` working tree, execute the reviewed release:
 mise run release-auto
 ```
 
-This repository uses [release.toml](./release.toml) to:
-
-- create tags as `v{{version}}`
-- create a release commit before tagging
-- push the branch and tag to `origin`
-- skip `cargo publish`, since GitHub Actions handles packaging and the Homebrew
-  formula update
+[cog.toml](./cog.toml) configures the release. Before the release commit, its
+pre-bump hooks set the Cargo version, run the tests, and check that
+`barrs --version` prints the new version. After the commit, it pushes `main`
+and the `v{{version}}` tag to `origin`. Nothing is published to crates.io.
 
 After the tag is pushed, GitHub Actions builds the macOS archives, publishes the
 GitHub release assets, and updates `Formula/barrs.rb`.
 
-`release-auto` invokes `cargo-release` internally. Do not run a separate manual
-patch-release flow, hand-edit `Cargo.toml`, or create tags manually.
+Do not hand-edit the version in `Cargo.toml` or create tags manually.
 
 ## Notes
 
