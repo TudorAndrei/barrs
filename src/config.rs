@@ -49,15 +49,15 @@ pub struct BarConfig {
     pub notch_display_height: u32,
 }
 
-fn default_spacing() -> u32 {
+const fn default_spacing() -> u32 {
     6
 }
 
-fn default_notch_width() -> u32 {
+const fn default_notch_width() -> u32 {
     200
 }
 
-fn default_notch_padding() -> u32 {
+const fn default_notch_padding() -> u32 {
     8
 }
 
@@ -91,7 +91,8 @@ impl BarSection {
         }
     }
 
-    pub fn rank(self) -> u8 {
+    #[must_use]
+    pub const fn rank(self) -> u8 {
         match self {
             Self::Left => 0,
             Self::Middle => 1,
@@ -162,6 +163,12 @@ pub struct ItemHandlers {
     pub hover_update: Option<String>,
 }
 
+/// Loads the Lua config at `path` and keeps its Lua runtime.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read, the Lua code fails, or the
+/// config is not valid.
 pub fn load_config_with_runtime(path: &Path) -> Result<(Config, Lua), BarrsError> {
     let source = fs::read_to_string(path)?;
     let lua = Lua::new();
@@ -175,10 +182,21 @@ pub fn load_config_with_runtime(path: &Path) -> Result<(Config, Lua), BarrsError
     Ok((config, lua))
 }
 
+/// Loads and validates the Lua config at `path`.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read, the Lua code fails, or the
+/// config is not valid.
 pub fn load_config(path: &Path) -> Result<Config, BarrsError> {
     load_config_with_runtime(path).map(|(config, _)| config)
 }
 
+/// Checks item ids, placements, and plugin settings.
+///
+/// # Errors
+///
+/// Returns [`BarrsError::InvalidConfig`] for the first invalid value.
 pub fn validate_config(config: &Config) -> Result<(), BarrsError> {
     if config.items.is_empty() {
         return Err(BarrsError::InvalidConfig(
@@ -199,11 +217,10 @@ pub fn validate_config(config: &Config) -> Result<(), BarrsError> {
             )));
         }
     }
-    for (index, item) in config.items.iter().enumerate() {
-        if config.items[index + 1..]
-            .iter()
-            .any(|candidate| candidate.id == item.id)
-        {
+    let mut remaining = config.items.as_slice();
+    while let Some((item, rest)) = remaining.split_first() {
+        remaining = rest;
+        if rest.iter().any(|candidate| candidate.id == item.id) {
             return Err(BarrsError::InvalidConfig(format!(
                 "duplicate item id {}",
                 item.id
