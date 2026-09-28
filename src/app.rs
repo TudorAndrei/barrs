@@ -16,6 +16,16 @@ use crate::ipc::{EventPayload, Request, Response, default_socket_path, send_requ
 use crate::render::create_renderer;
 use crate::{config, rift};
 
+/// Runs the command that `cli` selects.
+///
+/// # Errors
+///
+/// Returns an error when the config is invalid, the daemon cannot start, or
+/// the daemon rejects or cannot answer a request.
+#[expect(
+    clippy::future_not_send,
+    reason = "the renderer owns AppKit objects and runs on the current-thread runtime"
+)]
 pub async fn run(cli: Cli) -> Result<(), BarrsError> {
     match cli.command {
         Command::Start(args) => {
@@ -264,7 +274,7 @@ fn print_response(response: Response) -> Result<(), BarrsError> {
             println!(
                 "{}",
                 serde_json::to_string(&backend).unwrap_or_else(|_| "\"unknown\"".into())
-            )
+            );
         }
         Response::Error { message } => return Err(BarrsError::DaemonRejected(message)),
     }
