@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [0.2.7](https://github.com/TudorAndrei/barrs/releases/tag/v0.2.7) - 2026-09-28
+
+### Documentation
+
+- (**release**) record the cog bump release flow - ([92d73aa](https://github.com/TudorAndrei/barrs/commit/92d73aaf57ff95da2fa26e52324c449f74a98135)) - TudorAndrei
+
+### Build system
+
+- (**mise**) route cargo through mbx shared build cache - ([8d2c1dc](https://github.com/TudorAndrei/barrs/commit/8d2c1dcd8fc365e89b255b5cbf47abc592b8358b)) - TudorAndrei
+
+### Continuous Integration
+
+- (**release**) release with cog bump hooks - ([60e5397](https://github.com/TudorAndrei/barrs/commit/60e539719b404bec010a6e13a6398b7a16b46a58)) - TudorAndrei
+- cache rust builds with mr-boxington - ([e8544fd](https://github.com/TudorAndrei/barrs/commit/e8544fd16fe4b43d4a5074f561ddb788ce745f20)) - TudorAndrei
+
+### Refactoring
+
+- (**app**) satisfy strict clippy lints - ([8295338](https://github.com/TudorAndrei/barrs/commit/8295338bfd8f55de0d060f40062af65bde4db5e9)) - TudorAndrei
+- (**cli**) replace clap with usage-rs - ([505b8b2](https://github.com/TudorAndrei/barrs/commit/505b8b28f90d3490e4160a9e4f137f12f0efd404)) - TudorAndrei
+- (**config**) satisfy strict clippy lints - ([e083a8b](https://github.com/TudorAndrei/barrs/commit/e083a8b360e50a9808d01964cf600ae3c1b03035)) - TudorAndrei
+- (**daemon**) satisfy strict clippy lints - ([ef29875](https://github.com/TudorAndrei/barrs/commit/ef29875d7f533318ec9271f7a3332c0b97df6a8c)) - TudorAndrei
+- (**ipc**) satisfy strict clippy lints - ([dc48bad](https://github.com/TudorAndrei/barrs/commit/dc48bad8aa24c2b3828b4bbfc9a558d9c7c1d303)) - TudorAndrei
+- (**plugin**) satisfy strict clippy lints - ([5133c10](https://github.com/TudorAndrei/barrs/commit/5133c106d324d9f0fc75b4745882f91435aa7a46)) - TudorAndrei
+- (**render**) satisfy strict clippy lints - ([f0f745f](https://github.com/TudorAndrei/barrs/commit/f0f745f280d113e83ffc64e2651c24d8dcf2ef4b)) - TudorAndrei
+- (**rift**) satisfy strict clippy lints - ([c1c9fa6](https://github.com/TudorAndrei/barrs/commit/c1c9fa654b66aeccba10eaa6204c29bd3316740a)) - TudorAndrei
+
+- - -
+
 
 ## [0.2.6](https://github.com/TudorAndrei/barrs/compare/v0.2.5...v0.2.6) - 2026-08-04
 
