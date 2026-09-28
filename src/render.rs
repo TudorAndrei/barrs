@@ -64,11 +64,27 @@ pub enum RendererKind {
 
 /// A renderer is owned by the current application thread.
 ///
-/// Native renderers retain AppKit objects and therefore intentionally do not
+/// Native renderers retain `AppKit` objects and therefore intentionally do not
 /// promise `Send` or `Sync`.
 pub trait Renderer {
+    /// Prepares the renderer for `config`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the renderer cannot create its surfaces.
     fn initialize(&mut self, _config: &Config) -> Result<(), BarrsError>;
+    /// Draws one item snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the renderer cannot draw the item.
     fn render_item(&mut self, snapshot: &RenderItemSnapshot) -> Result<(), BarrsError>;
+    /// Reinitializes the renderer and draws all `snapshots`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error from [`Renderer::initialize`] or
+    /// [`Renderer::render_item`].
     fn reconcile(
         &mut self,
         config: &Config,
@@ -80,9 +96,19 @@ pub trait Renderer {
         }
         Ok(())
     }
+    /// Returns the input events collected since the last call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the renderer cannot read its event queue.
     fn drain_events(&mut self) -> Result<Vec<EventPayload>, BarrsError> {
         Ok(Vec::new())
     }
+    /// Applies an event to the renderer state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the renderer cannot apply the event.
     fn handle_event(&mut self, _event: &EventPayload) -> Result<(), BarrsError> {
         Ok(())
     }
@@ -114,7 +140,7 @@ impl<T: Renderer + ?Sized> Renderer for Box<T> {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RenderItemSnapshot {
     pub id: String,
     pub order: usize,
@@ -149,7 +175,7 @@ impl RenderItemSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HoverSurface {
     pub tooltip: Option<String>,
     pub detail: Option<String>,
@@ -165,6 +191,10 @@ impl From<&HoverConfig> for HoverSurface {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is an independent handler switch in the serialized snapshot"
+)]
 pub struct InteractiveSnapshot {
     pub click: bool,
     pub right_click: bool,
@@ -173,7 +203,7 @@ pub struct InteractiveSnapshot {
 }
 
 impl InteractiveSnapshot {
-    fn from_handlers(item: &ItemConfig) -> Self {
+    const fn from_handlers(item: &ItemConfig) -> Self {
         Self {
             click: item.handlers.click.is_some(),
             right_click: item.handlers.right_click.is_some(),
@@ -422,8 +452,8 @@ impl NativeSurfaceState {
             },
         });
         self.items.sort_by(|left, right| {
-            section_rank(&left.snapshot.placement)
-                .cmp(&section_rank(&right.snapshot.placement))
+            section_rank(left.snapshot.placement.as_deref())
+                .cmp(&section_rank(right.snapshot.placement.as_deref()))
                 .then_with(|| left.snapshot.order.cmp(&right.snapshot.order))
         });
         self.relayout();
@@ -451,9 +481,9 @@ impl NativeSurfaceState {
 
     fn relayout_content_width(&mut self) {
         let mut cursor = self.item_spacing;
-        for index in 0..self.items.len() {
-            let width = measure_item_width(&self.items[index].snapshot);
-            self.items[index].frame = ItemFrame {
+        for item in &mut self.items {
+            let width = measure_item_width(&item.snapshot);
+            item.frame = ItemFrame {
                 x: cursor,
                 width,
                 height: self.bar_height,
@@ -465,8 +495,11 @@ impl NativeSurfaceState {
     fn layout_left_items(&mut self, indices: &[usize]) {
         let mut cursor = self.layout.safe_left + self.item_spacing;
         for &index in indices {
-            let width = measure_item_width(&self.items[index].snapshot);
-            self.items[index].frame = ItemFrame {
+            let Some(item) = self.items.get_mut(index) else {
+                continue;
+            };
+            let width = measure_item_width(&item.snapshot);
+            item.frame = ItemFrame {
                 x: cursor,
                 width,
                 height: self.bar_height,
@@ -479,9 +512,12 @@ impl NativeSurfaceState {
         let mut cursor = (self.layout.bar_width - self.layout.safe_right - self.item_spacing)
             .max(self.layout.safe_left);
         for &index in indices {
-            let width = measure_item_width(&self.items[index].snapshot);
+            let Some(item) = self.items.get_mut(index) else {
+                continue;
+            };
+            let width = measure_item_width(&item.snapshot);
             cursor = (cursor - width).max(self.layout.safe_left);
-            self.items[index].frame = ItemFrame {
+            item.frame = ItemFrame {
                 x: cursor,
                 width,
                 height: self.bar_height,
@@ -505,8 +541,11 @@ impl NativeSurfaceState {
         let usable_width = self.layout.usable_width();
         let mut cursor = usable_start + ((usable_width - total_width) / 2.0).max(0.0);
         for &index in indices {
-            let width = measure_item_width(&self.items[index].snapshot);
-            self.items[index].frame = ItemFrame {
+            let Some(item) = self.items.get_mut(index) else {
+                continue;
+            };
+            let width = measure_item_width(&item.snapshot);
+            item.frame = ItemFrame {
                 x: cursor,
                 width,
                 height: self.bar_height,
@@ -524,9 +563,12 @@ impl NativeSurfaceState {
             split_middle_indices(&self.items, indices, self.item_spacing);
         let mut left_cursor = (reserved.start - self.item_spacing).min(self.layout.bar_width);
         for index in left_indices {
-            let width = measure_item_width(&self.items[index].snapshot);
+            let Some(item) = self.items.get_mut(index) else {
+                continue;
+            };
+            let width = measure_item_width(&item.snapshot);
             left_cursor = (left_cursor - width).max(self.layout.safe_left);
-            self.items[index].frame = ItemFrame {
+            item.frame = ItemFrame {
                 x: left_cursor,
                 width,
                 height: self.bar_height,
@@ -538,11 +580,14 @@ impl NativeSurfaceState {
             .max(self.layout.safe_left)
             .min(self.layout.bar_width - self.layout.safe_right);
         for index in right_indices {
-            let width = measure_item_width(&self.items[index].snapshot);
+            let Some(item) = self.items.get_mut(index) else {
+                continue;
+            };
+            let width = measure_item_width(&item.snapshot);
             let max_x =
                 (self.layout.bar_width - self.layout.safe_right - width).max(self.layout.safe_left);
             let x = right_cursor.min(max_x);
-            self.items[index].frame = ItemFrame {
+            item.frame = ItemFrame {
                 x,
                 width,
                 height: self.bar_height,
@@ -626,7 +671,7 @@ struct MockNativeHost {
 
 impl MockNativeHost {
     #[cfg(test)]
-    fn last_scene(&self) -> Option<&BarScene> {
+    const fn last_scene(&self) -> Option<&BarScene> {
         self.last_scene.as_ref()
     }
 
@@ -636,7 +681,7 @@ impl MockNativeHost {
     }
 
     #[cfg(test)]
-    fn runtime(&self) -> &HostRuntimeState {
+    const fn runtime(&self) -> &HostRuntimeState {
         &self.runtime
     }
 }
@@ -694,7 +739,7 @@ impl NativeHost for AppKitHost {
         let mtm = main_thread_marker()?;
         let app = NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-        self.background = config.bar.background.clone();
+        self.background.clone_from(&config.bar.background);
         self.notch_offset = config.bar.notch_offset;
         self.notch_display_height = config.bar.notch_display_height;
         self.app = Some(app);
@@ -724,7 +769,7 @@ impl NativeHost for AppKitHost {
     }
 
     fn drain_events(&mut self) -> Result<Vec<EventPayload>, BarrsError> {
-        self.pump_events()?;
+        self.pump_events();
         let hover_events = self.poll_hover_payloads();
         self.pending_events.extend(hover_events);
         self.update_display_reconfiguration_schedule();
@@ -756,7 +801,7 @@ impl Drop for AppKitHost {
             unsafe {
                 CGDisplayRemoveReconfigurationCallback(
                     Some(display_reconfiguration_callback),
-                    flag.as_ref() as *const AtomicBool as *mut c_void,
+                    atomic_flag_user_info(flag),
                 );
             }
         }
@@ -786,9 +831,14 @@ unsafe extern "C-unwind" fn display_reconfiguration_callback(
         | CGDisplayChangeSummaryFlags::DesktopShapeChangedFlag;
 
     if flags.intersects(relevant) {
-        let pending = unsafe { &*(user_info as *const AtomicBool) };
+        let pending = unsafe { &*user_info.cast_const().cast::<AtomicBool>() };
         pending.store(true, Ordering::Release);
     }
+}
+
+#[cfg(target_os = "macos")]
+const fn atomic_flag_user_info(flag: &AtomicBool) -> *mut c_void {
+    std::ptr::from_ref(flag).cast_mut().cast::<c_void>()
 }
 
 #[cfg(target_os = "macos")]
@@ -804,7 +854,7 @@ impl AppKitHost {
         let result = unsafe {
             CGDisplayRegisterReconfigurationCallback(
                 Some(display_reconfiguration_callback),
-                flag.as_ref() as *const AtomicBool as *mut c_void,
+                atomic_flag_user_info(flag),
             )
         };
         if result != CGError::Success {
@@ -819,8 +869,7 @@ impl AppKitHost {
     fn take_display_reconfiguration_pending(&self) -> bool {
         self.display_reconfiguration_pending
             .as_ref()
-            .map(|flag| flag.swap(false, Ordering::AcqRel))
-            .unwrap_or(false)
+            .is_some_and(|flag| flag.swap(false, Ordering::AcqRel))
     }
 
     fn update_display_reconfiguration_schedule(&mut self) {
@@ -832,7 +881,7 @@ impl AppKitHost {
         self.invalidate_native_window("display-reconfiguration-start");
         self.display_reconfiguration_rebuilds_remaining = DISPLAY_RECONFIGURATION_REBUILDS;
         self.display_reconfiguration_deadline =
-            Some(Instant::now() + Duration::from_millis(DISPLAY_RECONFIGURATION_SETTLE_MS));
+            Instant::now().checked_add(Duration::from_millis(DISPLAY_RECONFIGURATION_SETTLE_MS));
     }
 
     fn display_reconfiguration_rebuild_due(&mut self) -> bool {
@@ -843,12 +892,12 @@ impl AppKitHost {
             return false;
         }
 
-        if self.display_reconfiguration_rebuilds_remaining > 0 {
-            self.display_reconfiguration_rebuilds_remaining -= 1;
-        }
+        self.display_reconfiguration_rebuilds_remaining = self
+            .display_reconfiguration_rebuilds_remaining
+            .saturating_sub(1);
         if self.display_reconfiguration_rebuilds_remaining > 0 {
             self.display_reconfiguration_deadline =
-                Some(Instant::now() + Duration::from_millis(DISPLAY_RECONFIGURATION_RETRY_MS));
+                Instant::now().checked_add(Duration::from_millis(DISPLAY_RECONFIGURATION_RETRY_MS));
         } else {
             self.display_reconfiguration_deadline = None;
         }
@@ -881,9 +930,9 @@ impl AppKitHost {
         Ok(self.current_screen_signature != target_screen_signature()?)
     }
 
-    fn pump_events(&mut self) -> Result<(), BarrsError> {
+    fn pump_events(&mut self) {
         let Some(app) = self.app.clone() else {
-            return Ok(());
+            return;
         };
         let mask = NSEventMask::MouseMoved
             | NSEventMask::LeftMouseDragged
@@ -904,14 +953,17 @@ impl AppKitHost {
             app.sendEvent(&event);
             self.pending_events.extend(payloads);
         }
-        Ok(())
     }
 
     fn event_payloads(&mut self, event: &NSEvent) -> Vec<EventPayload> {
         let target = self.hit_test_event(event);
         match event.r#type() {
-            NSEventType::LeftMouseDown => {
-                if let Some(target) = target {
+            NSEventType::LeftMouseDown => target.map_or_else(
+                || {
+                    self.dismiss_hover_panel();
+                    Vec::new()
+                },
+                |target| {
                     vec![event_payload(
                         target,
                         EventKind::Click,
@@ -919,13 +971,14 @@ impl AppKitHost {
                         Some("left".into()),
                         None,
                     )]
-                } else {
+                },
+            ),
+            NSEventType::RightMouseDown => target.map_or_else(
+                || {
                     self.dismiss_hover_panel();
                     Vec::new()
-                }
-            }
-            NSEventType::RightMouseDown => {
-                if let Some(target) = target {
+                },
+                |target| {
                     vec![event_payload(
                         target,
                         EventKind::RightClick,
@@ -933,24 +986,17 @@ impl AppKitHost {
                         Some("right".into()),
                         None,
                     )]
-                } else {
-                    self.dismiss_hover_panel();
-                    Vec::new()
-                }
-            }
-            NSEventType::ScrollWheel => {
-                if let Some(target) = target {
-                    vec![event_payload(
-                        target,
-                        EventKind::Scroll,
-                        event,
-                        None,
-                        Some(event.scrollingDeltaY().round() as i32),
-                    )]
-                } else {
-                    Vec::new()
-                }
-            }
+                },
+            ),
+            NSEventType::ScrollWheel => target.map_or_else(Vec::new, |target| {
+                vec![event_payload(
+                    target,
+                    EventKind::Scroll,
+                    event,
+                    None,
+                    Some(round_to_i32(event.scrollingDeltaY())),
+                )]
+            }),
             _ => Vec::new(),
         }
     }
@@ -1042,7 +1088,7 @@ impl AppKitHost {
             match command {
                 HostCommand::ConfigureWindow(frame) => self.configure_window(frame)?,
                 HostCommand::UpsertItemLayer(mutation) => self.upsert_item_layer(mutation)?,
-                HostCommand::RemoveItemLayer { item_id } => self.remove_item_layer(item_id)?,
+                HostCommand::RemoveItemLayer { item_id } => self.remove_item_layer(item_id),
                 HostCommand::ShowHoverPanel(panel) => self.show_hover_panel(panel)?,
                 HostCommand::HideHoverPanel => self.hide_hover_panel(),
             }
@@ -1068,7 +1114,7 @@ impl AppKitHost {
             height: anchored.height,
         };
         if self.window.is_none() || self.content_view.is_none() {
-            let window = create_bar_window(mtm, &anchored, self.background.as_deref())?;
+            let window = create_bar_window(mtm, &anchored, self.background.as_deref());
             let content_view = create_content_view(mtm, &content_frame);
             window.setContentView(Some(&content_view));
             window.orderFrontRegardless();
@@ -1104,7 +1150,7 @@ impl AppKitHost {
 
         if let Some(icon) = &mutation.layer.icon {
             if entry.icon_label.is_none() {
-                let icon_label = create_icon_label(mtm, &icon.value, &mutation.layer.frame)?;
+                let icon_label = create_icon_label(mtm, &icon.value, &mutation.layer.frame);
                 icon_label.setTextColor(Some(&color_for_tone(TextTone::Secondary)));
                 content_view.addSubview(&icon_label);
                 entry.icon_label = Some(icon_label);
@@ -1119,13 +1165,12 @@ impl AppKitHost {
         }
 
         while entry.text_labels.len() < mutation.layer.text_segments.len() {
-            let label = create_label(mtm, "", &mutation.layer.frame)?;
+            let label = create_label(mtm, "", &mutation.layer.frame);
             content_view.addSubview(&label);
             entry.text_labels.push(label);
         }
 
-        for (index, segment) in mutation.layer.text_segments.iter().enumerate() {
-            let label = &entry.text_labels[index];
+        for (label, segment) in entry.text_labels.iter().zip(&mutation.layer.text_segments) {
             label.setStringValue(&NSString::from_str(&segment.value));
             label.setTextColor(Some(&color_for_tone(segment.tone)));
             layout_text_label(label, segment, &mutation.layer.frame);
@@ -1142,7 +1187,7 @@ impl AppKitHost {
         Ok(())
     }
 
-    fn remove_item_layer(&mut self, item_id: &str) -> Result<(), BarrsError> {
+    fn remove_item_layer(&mut self, item_id: &str) {
         if let Some(view) = self.item_views.remove(item_id) {
             if let Some(icon_label) = view.icon_label {
                 icon_label.removeFromSuperview();
@@ -1151,14 +1196,13 @@ impl AppKitHost {
                 label.removeFromSuperview();
             }
         }
-        Ok(())
     }
 
     fn show_hover_panel(&mut self, panel: &HoverPanelPlan) -> Result<(), BarrsError> {
         let mtm = main_thread_marker()?;
         if self.hover_panel.is_none() || self.hover_label.is_none() {
-            let hover_panel = create_hover_panel(mtm, panel)?;
-            let hover_label = create_hover_label(mtm, panel)?;
+            let hover_panel = create_hover_panel(mtm, panel);
+            let hover_label = create_hover_label(mtm, panel);
             if let Some(content_view) = hover_panel.contentView() {
                 content_view.addSubview(&hover_label);
             }
@@ -1170,11 +1214,10 @@ impl AppKitHost {
         let anchor = self
             .window
             .as_ref()
-            .map(|window| {
+            .map_or((panel.anchor_x, panel.anchor_y), |window| {
                 let frame = window.frame();
                 (frame.origin.x + panel.anchor_x, frame.origin.y)
-            })
-            .unwrap_or((panel.anchor_x, panel.anchor_y));
+            });
         let frame = hover_panel_frame_at(anchor.0, anchor.1, &text);
         if let Some(label) = &self.hover_label {
             label.setStringValue(&NSString::from_str(&text));
@@ -1193,7 +1236,7 @@ impl AppKitHost {
         Ok(())
     }
 
-    fn hide_hover_panel(&mut self) {
+    fn hide_hover_panel(&self) {
         if let Some(panel) = &self.hover_panel {
             panel.orderOut(None);
         }
@@ -1212,7 +1255,7 @@ fn main_thread_marker() -> Result<MainThreadMarker, BarrsError> {
 }
 
 #[cfg(target_os = "macos")]
-fn ns_rect(frame: &WindowFrame) -> NSRect {
+const fn ns_rect(frame: &WindowFrame) -> NSRect {
     NSRect {
         origin: NSPoint {
             x: frame.x,
@@ -1230,7 +1273,7 @@ fn create_bar_window(
     mtm: MainThreadMarker,
     frame: &WindowFrame,
     background: Option<&str>,
-) -> Result<objc2::rc::Retained<NSWindow>, BarrsError> {
+) -> objc2::rc::Retained<NSWindow> {
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
@@ -1249,12 +1292,14 @@ fn create_bar_window(
     window.setAcceptsMouseMovedEvents(true);
     window.setLevel(NSMainMenuWindowLevel);
     apply_window_background(&window, background);
-    Ok(window)
+    window
 }
 
 #[cfg(target_os = "macos")]
 fn apply_backstop_level(window: &NSWindow) {
-    let window_id = window.windowNumber() as u32;
+    let Ok(window_id) = u32::try_from(window.windowNumber()) else {
+        return;
+    };
     if window_id == 0 {
         return;
     }
@@ -1285,20 +1330,26 @@ fn parse_hex_color(hex: &str) -> Option<(f64, f64, f64, f64)> {
     let value = hex.trim().strip_prefix('#')?;
     match value.len() {
         6 => {
-            let red = u8::from_str_radix(&value[0..2], 16).ok()? as f64 / 255.0;
-            let green = u8::from_str_radix(&value[2..4], 16).ok()? as f64 / 255.0;
-            let blue = u8::from_str_radix(&value[4..6], 16).ok()? as f64 / 255.0;
+            let red = hex_channel(value, 0)?;
+            let green = hex_channel(value, 2)?;
+            let blue = hex_channel(value, 4)?;
             Some((red, green, blue, 1.0))
         }
         8 => {
-            let red = u8::from_str_radix(&value[0..2], 16).ok()? as f64 / 255.0;
-            let green = u8::from_str_radix(&value[2..4], 16).ok()? as f64 / 255.0;
-            let blue = u8::from_str_radix(&value[4..6], 16).ok()? as f64 / 255.0;
-            let alpha = u8::from_str_radix(&value[6..8], 16).ok()? as f64 / 255.0;
+            let red = hex_channel(value, 0)?;
+            let green = hex_channel(value, 2)?;
+            let blue = hex_channel(value, 4)?;
+            let alpha = hex_channel(value, 6)?;
             Some((red, green, blue, alpha))
         }
         _ => None,
     }
+}
+
+fn hex_channel(value: &str, start: usize) -> Option<f64> {
+    let digits = value.get(start..start.checked_add(2)?)?;
+    let channel = u8::from_str_radix(digits, 16).ok()?;
+    Some(f64::from(channel) / 255.0)
 }
 
 #[cfg(target_os = "macos")]
@@ -1313,7 +1364,7 @@ fn create_label(
     mtm: MainThreadMarker,
     value: &str,
     frame: &ItemFrame,
-) -> Result<objc2::rc::Retained<NSTextField>, BarrsError> {
+) -> objc2::rc::Retained<NSTextField> {
     let label = NSTextField::labelWithString(&NSString::from_str(value), mtm);
     label.setBezeled(false);
     label.setBordered(false);
@@ -1332,7 +1383,7 @@ fn create_label(
         },
         frame,
     );
-    Ok(label)
+    label
 }
 
 #[cfg(target_os = "macos")]
@@ -1340,7 +1391,7 @@ fn create_icon_label(
     mtm: MainThreadMarker,
     value: &str,
     frame: &ItemFrame,
-) -> Result<objc2::rc::Retained<NSTextField>, BarrsError> {
+) -> objc2::rc::Retained<NSTextField> {
     let label = NSTextField::labelWithString(&NSString::from_str(value), mtm);
     label.setBezeled(false);
     label.setBordered(false);
@@ -1349,14 +1400,14 @@ fn create_icon_label(
     label.setEditable(false);
     label.setFont(Some(&NSFont::systemFontOfSize(ITEM_LABEL_FONT_SIZE)));
     layout_icon_label(&label, frame);
-    Ok(label)
+    label
 }
 
 #[cfg(target_os = "macos")]
 fn create_hover_panel(
     mtm: MainThreadMarker,
     panel: &HoverPanelPlan,
-) -> Result<objc2::rc::Retained<NSPanel>, BarrsError> {
+) -> objc2::rc::Retained<NSPanel> {
     let frame = hover_panel_frame(panel, &hover_panel_text(panel));
     let panel_window = NSPanel::initWithContentRect_styleMask_backing_defer(
         NSPanel::alloc(mtm),
@@ -1377,14 +1428,14 @@ fn create_hover_panel(
 
     let content_view = NSView::initWithFrame(NSView::alloc(mtm), ns_rect(&frame));
     panel_window.setContentView(Some(&content_view));
-    Ok(panel_window)
+    panel_window
 }
 
 #[cfg(target_os = "macos")]
 fn create_hover_label(
     mtm: MainThreadMarker,
     panel: &HoverPanelPlan,
-) -> Result<objc2::rc::Retained<NSTextField>, BarrsError> {
+) -> objc2::rc::Retained<NSTextField> {
     let text = hover_panel_text(panel);
     let frame = hover_panel_frame(panel, &text);
     let label = NSTextField::labelWithString(&NSString::from_str(&text), mtm);
@@ -1402,7 +1453,7 @@ fn create_hover_label(
             height: frame.height - 16.0,
         },
     });
-    Ok(label)
+    label
 }
 
 #[cfg(target_os = "macos")]
@@ -1462,14 +1513,15 @@ fn hover_panel_frame(panel: &HoverPanelPlan, text: &str) -> WindowFrame {
 
 #[cfg(target_os = "macos")]
 fn hover_panel_frame_at(anchor_x: f64, anchor_y: f64, text: &str) -> WindowFrame {
-    let max_line_width = text
-        .lines()
-        .map(|line| line.chars().count())
-        .max()
-        .unwrap_or(10) as f64;
-    let line_count = text.lines().count().max(1) as f64;
-    let width = (max_line_width * CHARACTER_WIDTH) + 24.0;
-    let height = (line_count * 18.0) + 16.0;
+    let max_line_width = count_to_f64(
+        text.lines()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(10),
+    );
+    let line_count = count_to_f64(text.lines().count().max(1));
+    let width = max_line_width.mul_add(CHARACTER_WIDTH, 24.0);
+    let height = line_count.mul_add(18.0, 16.0);
     WindowFrame {
         x: anchor_x - (width / 2.0),
         y: anchor_y - height - 4.0,
@@ -1503,7 +1555,7 @@ fn bar_screen_layout_geometry(config: &Config, mtm: MainThreadMarker) -> LayoutG
     let Some(screen) = bar_screen(mtm) else {
         return LayoutGeometry::default();
     };
-    screen_layout_geometry(config, appkit_screen_geometry(&screen))
+    screen_layout_geometry(config, &appkit_screen_geometry(&screen))
 }
 
 #[derive(Debug, Clone)]
@@ -1528,10 +1580,10 @@ impl From<&ScreenGeometry> for ScreenSignature {
     fn from(screen: &ScreenGeometry) -> Self {
         Self {
             display_id: screen.display_id,
-            x: screen.full.x.round() as i64,
-            y: screen.full.y.round() as i64,
-            width: screen.full.width.round() as i64,
-            height: screen.full.height.round() as i64,
+            x: round_to_i64(screen.full.x),
+            y: round_to_i64(screen.full.y),
+            width: round_to_i64(screen.full.width),
+            height: round_to_i64(screen.full.height),
         }
     }
 }
@@ -1554,7 +1606,7 @@ fn appkit_screen_geometry(screen: &NSScreen) -> ScreenGeometry {
 }
 
 #[cfg(target_os = "macos")]
-fn window_frame_from_rect(rect: NSRect) -> WindowFrame {
+const fn window_frame_from_rect(rect: NSRect) -> WindowFrame {
     WindowFrame {
         x: rect.origin.x,
         y: rect.origin.y,
@@ -1563,7 +1615,7 @@ fn window_frame_from_rect(rect: NSRect) -> WindowFrame {
     }
 }
 
-fn screen_layout_geometry(config: &Config, screen: ScreenGeometry) -> LayoutGeometry {
+fn screen_layout_geometry(config: &Config, screen: &ScreenGeometry) -> LayoutGeometry {
     LayoutGeometry {
         bar_width: screen.full.width,
         safe_left: 0.0,
@@ -1586,7 +1638,9 @@ fn center_reserved_range(
     if !notch_active || bar_width <= 0.0 || notch_width == 0 {
         return None;
     }
-    let width = (notch_width as f64 + 2.0 * notch_padding as f64).min(bar_width);
+    let width = 2.0f64
+        .mul_add(f64::from(notch_padding), f64::from(notch_width))
+        .min(bar_width);
     let center = bar_width / 2.0;
     Some(CenterReservedRange {
         start: center - (width / 2.0),
@@ -1606,7 +1660,7 @@ fn anchor_bar_frame(
     };
     anchor_bar_frame_for_screen(
         frame,
-        appkit_screen_geometry(&screen),
+        &appkit_screen_geometry(&screen),
         notch_offset,
         notch_display_height,
     )
@@ -1658,14 +1712,14 @@ fn debug_display_state(reason: &str, anchored: Option<&WindowFrame>) {
 
 fn anchor_bar_frame_for_screen(
     frame: &WindowFrame,
-    screen: ScreenGeometry,
+    screen: &ScreenGeometry,
     notch_offset: u32,
     notch_display_height: u32,
 ) -> WindowFrame {
     let visible_top = screen.visible.y + screen.visible.height;
     let full_top = screen.full.y + screen.full.height;
     let height = if screen.builtin && notch_display_height > 0 {
-        notch_display_height as f64
+        f64::from(notch_display_height)
     } else {
         bar_window_height(full_top, visible_top, frame.height)
     };
@@ -1673,7 +1727,7 @@ fn anchor_bar_frame_for_screen(
     WindowFrame {
         x: screen.full.x,
         y: y + if screen.builtin {
-            notch_offset as f64
+            f64::from(notch_offset)
         } else {
             0.0
         },
@@ -1707,6 +1761,11 @@ fn create_native_host() -> Box<dyn NativeHost> {
     }
 }
 
+/// Creates the renderer selected by `kind`.
+///
+/// # Errors
+///
+/// Returns an error when the selected renderer cannot be created.
 pub fn create_renderer(kind: RendererKind) -> Result<Box<dyn Renderer>, BarrsError> {
     match kind {
         RendererKind::Native => Ok(Box::new(NativeRenderer::new(create_native_host()))),
@@ -1729,7 +1788,8 @@ impl NativeRenderer {
         }
     }
 
-    pub fn surface_state(&self) -> &NativeSurfaceState {
+    #[must_use]
+    pub const fn surface_state(&self) -> &NativeSurfaceState {
         &self.state
     }
 
@@ -1765,7 +1825,7 @@ impl Renderer for NativeRenderer {
     fn initialize(&mut self, config: &Config) -> Result<(), BarrsError> {
         let removed_items = self.state.retain_configured_items(config);
         self.state.bar_height = BAR_HEIGHT;
-        self.state.item_spacing = config.bar.spacing as f64;
+        self.state.item_spacing = f64::from(config.bar.spacing);
         self.config = Some(config.clone());
         self.host.initialize(config)?;
         let layout = self.host.layout_geometry(config, self.state.bar_height)?;
@@ -1792,7 +1852,7 @@ impl Renderer for NativeRenderer {
         let active_hover_item = self.state.active_hover_item.clone();
         let mut next_state = NativeSurfaceState {
             bar_height: BAR_HEIGHT,
-            item_spacing: config.bar.spacing as f64,
+            item_spacing: f64::from(config.bar.spacing),
             layout,
             active_hover_item,
             items: Vec::new(),
@@ -1842,10 +1902,12 @@ pub struct NoopRenderer {
 }
 
 impl NoopRenderer {
-    pub fn rendered_items(&self) -> usize {
+    #[must_use]
+    pub const fn rendered_items(&self) -> usize {
         self.rendered_items
     }
 
+    #[must_use]
     pub fn snapshot(&self, item_id: &str) -> Option<&RenderItemSnapshot> {
         self.snapshots.get(item_id)
     }
@@ -1857,7 +1919,7 @@ impl Renderer for NoopRenderer {
     }
 
     fn render_item(&mut self, snapshot: &RenderItemSnapshot) -> Result<(), BarrsError> {
-        self.rendered_items += 1;
+        self.rendered_items = self.rendered_items.saturating_add(1);
         self.snapshots.insert(snapshot.id.clone(), snapshot.clone());
         Ok(())
     }
@@ -1867,7 +1929,7 @@ impl Renderer for NoopRenderer {
         _config: &Config,
         snapshots: &[RenderItemSnapshot],
     ) -> Result<(), BarrsError> {
-        self.rendered_items += snapshots.len();
+        self.rendered_items = self.rendered_items.saturating_add(snapshots.len());
         self.snapshots = snapshots
             .iter()
             .cloned()
@@ -1884,7 +1946,7 @@ fn measure_item_width(snapshot: &RenderItemSnapshot) -> f64 {
         0.0
     };
     let text_width = measure_snapshot_text_width(snapshot);
-    ITEM_HORIZONTAL_PADDING * 2.0 + icon_width + text_width + ITEM_TRAILING_TEXT_PADDING
+    ITEM_HORIZONTAL_PADDING.mul_add(2.0, icon_width) + text_width + ITEM_TRAILING_TEXT_PADDING
 }
 
 fn item_indices_for_section(items: &[PositionedItemSnapshot], section: BarSection) -> Vec<usize> {
@@ -1907,9 +1969,10 @@ fn item_indices_for_section(items: &[PositionedItemSnapshot], section: BarSectio
 fn section_total_width(items: &[PositionedItemSnapshot], indices: &[usize], spacing: f64) -> f64 {
     let widths = indices
         .iter()
-        .map(|index| measure_item_width(&items[*index].snapshot))
+        .filter_map(|&index| items.get(index))
+        .map(|item| measure_item_width(&item.snapshot))
         .sum::<f64>();
-    widths + spacing * indices.len().saturating_sub(1) as f64
+    spacing.mul_add(count_to_f64(indices.len().saturating_sub(1)), widths)
 }
 
 fn content_width(items: &[PositionedItemSnapshot], spacing: f64) -> f64 {
@@ -1930,7 +1993,10 @@ fn split_middle_indices(
     let mut right_width = 0.0;
 
     for &index in indices {
-        let width = measure_item_width(&items[index].snapshot);
+        let Some(item) = items.get(index) else {
+            continue;
+        };
+        let width = measure_item_width(&item.snapshot);
         if left_width <= right_width {
             left.push(index);
             left_width += width + spacing;
@@ -1947,7 +2013,7 @@ fn measure_snapshot_text_width(snapshot: &RenderItemSnapshot) -> f64 {
     if let Some(width) = measure_workspace_text_width(snapshot) {
         return width;
     }
-    stable_text_char_count(&snapshot.text) as f64 * CHARACTER_WIDTH
+    count_to_f64(stable_text_char_count(&snapshot.text)) * CHARACTER_WIDTH
 }
 
 fn stable_text_char_count(text: &str) -> usize {
@@ -1968,7 +2034,7 @@ fn measure_workspace_text_width(snapshot: &RenderItemSnapshot) -> Option<f64> {
         if index > 0 {
             width += DEFAULT_ITEM_SPACING;
         }
-        width += name.chars().count() as f64 * CHARACTER_WIDTH;
+        width = count_to_f64(name.chars().count()).mul_add(CHARACTER_WIDTH, width);
     }
     Some(width)
 }
@@ -2003,17 +2069,16 @@ fn workspace_text_segments(
                 TextTone::Tertiary
             },
         });
-        cursor += (name.chars().count() as f64 * CHARACTER_WIDTH) + DEFAULT_ITEM_SPACING;
+        cursor += count_to_f64(name.chars().count()).mul_add(CHARACTER_WIDTH, DEFAULT_ITEM_SPACING);
     }
     Some(segments)
 }
 
 fn host_scene_plan(scene: &BarScene) -> HostScenePlan {
-    let content_width = scene
-        .items
-        .last()
-        .map(|item| item.frame.x + item.frame.width + scene.items[0].frame.x)
-        .unwrap_or(0.0);
+    let content_width = match (scene.items.first(), scene.items.last()) {
+        (Some(first), Some(last)) => last.frame.x + last.frame.width + first.frame.x,
+        _ => 0.0,
+    };
     let item_layers = scene
         .items
         .iter()
@@ -2118,8 +2183,8 @@ fn diff_host_scene(previous: Option<&HostScenePlan>, next: &HostScenePlan) -> Ve
     commands
 }
 
-fn section_rank(placement: &Option<String>) -> u8 {
-    BarSection::from_placement(placement.as_deref())
+fn section_rank(placement: Option<&str>) -> u8 {
+    BarSection::from_placement(placement)
         .unwrap_or(BarSection::Left)
         .rank()
 }
@@ -2139,8 +2204,8 @@ fn event_payload(
         event,
         timestamp_ms: current_timestamp_ms(),
         mouse: crate::ipc::MouseState {
-            x: location.x.round() as i32,
-            y: location.y.round() as i32,
+            x: round_to_i32(location.x),
+            y: round_to_i32(location.y),
             button,
             scroll_delta,
         },
@@ -2160,13 +2225,37 @@ fn synthetic_event_payload(item_id: String, event: EventKind, x: f64, y: f64) ->
         event,
         timestamp_ms: current_timestamp_ms(),
         mouse: crate::ipc::MouseState {
-            x: x.round() as i32,
-            y: y.round() as i32,
+            x: round_to_i32(x),
+            y: round_to_i32(y),
             button: None,
             scroll_delta: None,
         },
         modifiers: crate::ipc::Modifiers::default(),
     }
+}
+
+/// Converts a count to `f64`, saturating at `u32::MAX`.
+fn count_to_f64(count: usize) -> f64 {
+    u32::try_from(count).map_or_else(|_| f64::from(u32::MAX), f64::from)
+}
+
+#[cfg(target_os = "macos")]
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "float-to-int `as` saturates and maps NaN to zero, which is the wanted rounding for pixel coordinates"
+)]
+const fn round_to_i32(value: f64) -> i32 {
+    value.round() as i32
+}
+
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "float-to-int `as` saturates and maps NaN to zero, which is the wanted rounding for screen geometry"
+)]
+const fn round_to_i64(value: f64) -> i64 {
+    value.round() as i64
 }
 
 #[cfg(test)]
@@ -2360,8 +2449,8 @@ mod tests {
             .expect("handle hover");
 
         let state = renderer.surface_state();
-        assert_eq!(state.bar_height, super::BAR_HEIGHT);
-        assert_eq!(state.item_spacing, 3.0);
+        assert_close(state.bar_height, super::BAR_HEIGHT);
+        assert_close(state.item_spacing, 3.0);
         assert_eq!(state.items.len(), 1);
         assert_eq!(state.active_hover_item.as_deref(), Some("cpu"));
         assert!(state.items[0].frame.width > 0.0);
@@ -2391,7 +2480,7 @@ mod tests {
         let mut hover_enter =
             EventPayload::from_trigger("b".into(), crate::cli::TriggerEvent::HoverEnter);
         hover_enter.mouse = MouseState {
-            x: (a_frame.x + 1.0).round() as i32,
+            x: i32::try_from(super::round_to_i64(a_frame.x + 1.0)).expect("x fits in i32"),
             y: 1,
             ..MouseState::default()
         };
@@ -2446,20 +2535,20 @@ mod tests {
         wider.text = "10%".into();
         wider.data = json!({ "text": "10%", "usage_percent": 10 });
 
-        assert_eq!(
+        assert_close(
             super::measure_item_width(&narrow),
-            super::measure_item_width(&wider)
+            super::measure_item_width(&wider),
         );
     }
 
     #[test]
     fn section_rank_treats_middle_as_center() {
-        assert_eq!(super::section_rank(&Some("left".into())), 0);
-        assert_eq!(super::section_rank(&Some("middle".into())), 1);
-        assert_eq!(super::section_rank(&Some("center".into())), 1);
-        assert_eq!(super::section_rank(&Some("right".into())), 2);
-        assert_eq!(super::section_rank(&Some("unknown".into())), 0);
-        assert_eq!(super::section_rank(&None), 0);
+        assert_eq!(super::section_rank(Some("left")), 0);
+        assert_eq!(super::section_rank(Some("middle")), 1);
+        assert_eq!(super::section_rank(Some("center")), 1);
+        assert_eq!(super::section_rank(Some("right")), 2);
+        assert_eq!(super::section_rank(Some("unknown")), 0);
+        assert_eq!(super::section_rank(None), 0);
     }
 
     #[test]
@@ -2648,7 +2737,7 @@ mod tests {
             .expect("render left");
 
         let plan = host_scene_plan(&renderer.state.scene());
-        assert_eq!(plan.window.width, 320.0);
+        assert_close(plan.window.width, 320.0);
     }
 
     #[test]
@@ -2691,8 +2780,8 @@ mod tests {
             notch_height: 24.0,
         };
 
-        let layout = super::screen_layout_geometry(&config, screen.clone());
-        assert_eq!(layout.bar_width, 300.0);
+        let layout = super::screen_layout_geometry(&config, &screen);
+        assert_close(layout.bar_width, 300.0);
         assert_eq!(
             layout.center_reserved,
             Some(super::CenterReservedRange {
@@ -2706,7 +2795,7 @@ mod tests {
             ..screen
         };
         assert_eq!(
-            super::screen_layout_geometry(&config, external).center_reserved,
+            super::screen_layout_geometry(&config, &external).center_reserved,
             None
         );
     }
@@ -2738,7 +2827,7 @@ mod tests {
         };
 
         assert_eq!(
-            super::anchor_bar_frame_for_screen(&frame, screen, 2, 32),
+            super::anchor_bar_frame_for_screen(&frame, &screen, 2, 32),
             super::WindowFrame {
                 x: 1440.0,
                 y: 670.0,
@@ -2775,7 +2864,7 @@ mod tests {
         };
 
         assert_eq!(
-            super::anchor_bar_frame_for_screen(&frame, screen, 0, 0),
+            super::anchor_bar_frame_for_screen(&frame, &screen, 0, 0),
             super::WindowFrame {
                 x: 0.0,
                 y: 1252.0,
@@ -2787,8 +2876,8 @@ mod tests {
 
     #[test]
     fn bar_window_height_matches_a_plausible_top_inset() {
-        assert_eq!(super::bar_window_height(900.0, 868.0, 28.0), 32.0);
-        assert_eq!(super::bar_window_height(900.0, 170.0, 28.0), 28.0);
+        assert_close(super::bar_window_height(900.0, 868.0, 28.0), 32.0);
+        assert_close(super::bar_window_height(900.0, 170.0, 28.0), 28.0);
     }
 
     struct ChangingLayoutHost {
@@ -2835,8 +2924,13 @@ mod tests {
             .render_item(&test_snapshot("clock", 0, Some("right"), "12:00"))
             .expect("render");
 
-        let scenes = scenes.lock().expect("scenes");
-        assert_eq!(scenes.last().expect("scene").bar_width, 240.0);
+        let bar_width = scenes
+            .lock()
+            .expect("scenes")
+            .last()
+            .expect("scene")
+            .bar_width;
+        assert_close(bar_width, 240.0);
     }
 
     #[test]
@@ -2852,8 +2946,13 @@ mod tests {
         let events = renderer.drain_events().expect("drain events");
 
         assert!(events.is_empty());
-        let scenes = scenes.lock().expect("scenes");
-        assert_eq!(scenes.last().expect("scene").bar_width, 240.0);
+        let bar_width = scenes
+            .lock()
+            .expect("scenes")
+            .last()
+            .expect("scene")
+            .bar_width;
+        assert_close(bar_width, 240.0);
     }
 
     #[cfg(target_os = "macos")]
@@ -2865,7 +2964,7 @@ mod tests {
             super::display_reconfiguration_callback(
                 1,
                 super::CGDisplayChangeSummaryFlags::MovedFlag,
-                &pending as *const AtomicBool as *mut std::ffi::c_void,
+                super::atomic_flag_user_info(&pending),
             );
         }
         assert!(pending.load(Ordering::Acquire));
@@ -2875,7 +2974,7 @@ mod tests {
             super::display_reconfiguration_callback(
                 1,
                 super::CGDisplayChangeSummaryFlags::BeginConfigurationFlag,
-                &pending as *const AtomicBool as *mut std::ffi::c_void,
+                super::atomic_flag_user_info(&pending),
             );
         }
         assert!(!pending.load(Ordering::Acquire));
@@ -2907,7 +3006,7 @@ mod tests {
         let state = renderer.surface_state();
         assert_eq!(state.items.len(), 1);
         assert_eq!(state.items[0].snapshot.id, "left-only");
-        assert_eq!(state.items[0].frame.x, 0.0);
+        assert_close(state.items[0].frame.x, 0.0);
     }
 
     #[test]
@@ -3027,7 +3126,7 @@ mod tests {
             .expect("gpu")
             .frame
             .x;
-        assert_eq!(updated_gpu_x, gpu_x);
+        assert_close(updated_gpu_x, gpu_x);
     }
 
     #[test]
@@ -3106,13 +3205,18 @@ mod tests {
         };
 
         let width = super::measure_item_width(&snapshot);
-        let expected = (super::ITEM_HORIZONTAL_PADDING * 2.0)
-            + super::ICON_WIDTH
-            + super::ICON_TEXT_SPACING
-            + (3.0 * super::CHARACTER_WIDTH)
-            + (2.0 * super::DEFAULT_ITEM_SPACING);
+        let expected = super::ITEM_HORIZONTAL_PADDING.mul_add(
+            2.0,
+            3.0f64.mul_add(
+                super::CHARACTER_WIDTH,
+                2.0f64.mul_add(
+                    super::DEFAULT_ITEM_SPACING,
+                    super::ICON_WIDTH + super::ICON_TEXT_SPACING,
+                ),
+            ),
+        );
 
-        assert_eq!(width, expected);
+        assert_close(width, expected);
     }
 
     #[test]
@@ -3221,12 +3325,12 @@ mod tests {
             hover: None,
         };
         host.present(&scene).expect("present");
-        assert_eq!(host.last_scene().expect("scene").bar_height, 28.0);
+        assert_close(host.last_scene().expect("scene").bar_height, 28.0);
         assert!(matches!(
             host.last_commands(),
             [HostCommand::ConfigureWindow(_)]
         ));
-        assert_eq!(host.runtime().window.as_ref().expect("window").height, 28.0);
+        assert_close(host.runtime().window.as_ref().expect("window").height, 28.0);
     }
 
     #[test]
@@ -3271,7 +3375,7 @@ mod tests {
 
         let plan = host_scene_plan(&scene);
         assert_eq!(plan.item_layers.len(), 1);
-        assert_eq!(plan.window.height, 28.0);
+        assert_close(plan.window.height, 28.0);
         assert_eq!(plan.hover_panel.expect("hover").item_id, "cpu");
     }
 
@@ -3365,7 +3469,7 @@ mod tests {
             }),
         ]);
 
-        assert_eq!(runtime.window.as_ref().expect("window").width, 160.0);
+        assert_close(runtime.window.as_ref().expect("window").width, 160.0);
         assert!(runtime.item_layers.contains_key("cpu"));
         assert_eq!(
             runtime
