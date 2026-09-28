@@ -39,6 +39,7 @@ pub struct RiftSnapshot {
 }
 
 impl RiftSnapshot {
+    #[must_use]
     pub fn signature(&self) -> u64 {
         let mut hasher = DefaultHasher::new();
         self.current_workspace.hash(&mut hasher);
@@ -68,7 +69,7 @@ pub enum RiftEventKind {
 }
 
 impl RiftEventKind {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::WorkspaceChanged => "workspace_changed",
             Self::WindowsChanged => "windows_changed",
@@ -95,6 +96,7 @@ pub struct RiftSubscription {
 }
 
 impl RiftSubscription {
+    #[must_use]
     pub fn drain(&self) -> Vec<RiftEvent> {
         self.receiver.try_iter().collect()
     }
@@ -125,6 +127,12 @@ impl Drop for RiftSubscription {
 
 pub trait RiftBackend: Send + Sync {
     fn kind(&self) -> RiftBackendKind;
+
+    /// Queries the current Rift workspace state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the backend cannot reach Rift or cannot decode its response.
     fn snapshot(&self) -> Result<RiftSnapshot, BarrsError>;
 }
 
@@ -165,6 +173,7 @@ impl RiftBackend for MachRiftBackend {
     }
 }
 
+#[must_use]
 pub fn select_backend() -> Box<dyn RiftBackend> {
     if mach_backend_available() {
         Box::new(MachRiftBackend)
@@ -173,6 +182,7 @@ pub fn select_backend() -> Box<dyn RiftBackend> {
     }
 }
 
+#[must_use]
 pub fn subscribe() -> Option<RiftSubscription> {
     #[cfg(target_os = "macos")]
     {
@@ -342,7 +352,7 @@ struct ParsedWorkspace {
 impl ParsedWorkspace {
     fn display_name(&self) -> String {
         self.index
-            .map(|index| (index + 1).to_string())
+            .map(|index| index.saturating_add(1).to_string())
             .or_else(|| self.name.clone().filter(|name| !name.trim().is_empty()))
             .or_else(|| self.workspace_id.map(|id| id.to_string()))
             .unwrap_or_else(|| "?".into())
@@ -365,20 +375,18 @@ fn parse_workspace(value: &Value) -> ParsedWorkspace {
     ParsedWorkspace {
         workspace_id: find_u64(value, &["workspace_id", "id"]),
         name: find_string(value, &["workspace_name", "name", "label", "title"]),
-        index: find_u64(value, &["workspace_index", "index"]).map(|value| value as usize),
+        index: find_usize(value, &["workspace_index", "index"]),
         active: find_bool(value, &["active", "is_active", "focused", "current"]).unwrap_or(false),
         visible: find_bool(value, &["visible", "is_visible"]).unwrap_or(false),
         layout: find_string(value, &["layout", "layout_mode", "mode"]),
-        window_count: find_u64(value, &["window_count"])
-            .map(|value| value as usize)
-            .or_else(|| {
-                value.as_object().and_then(|object| {
-                    object
-                        .get("windows")
-                        .and_then(Value::as_array)
-                        .map(|windows| windows.len())
-                })
-            }),
+        window_count: find_usize(value, &["window_count"]).or_else(|| {
+            value.as_object().and_then(|object| {
+                object
+                    .get("windows")
+                    .and_then(Value::as_array)
+                    .map(Vec::len)
+            })
+        }),
     }
 }
 
@@ -421,14 +429,12 @@ fn count_windows_in_value(
 
     windows
         .iter()
-        .filter(|window| {
-            if let Some(target_workspace) = workspace_id {
+        .filter(|window| match (workspace_id, space_id) {
+            (Some(target_workspace), _) => {
                 find_u64(window, &["workspace_id"]) == Some(target_workspace)
-            } else if let Some(target_space) = space_id {
-                find_u64(window, &["space_id"]) == Some(target_space)
-            } else {
-                true
             }
+            (None, Some(target_space)) => find_u64(window, &["space_id"]) == Some(target_space),
+            (None, None) => true,
         })
         .count()
 }
@@ -453,6 +459,10 @@ fn find_u64(value: &Value, keys: &[&str]) -> Option<u64> {
     None
 }
 
+fn find_usize(value: &Value, keys: &[&str]) -> Option<usize> {
+    find_u64(value, keys).and_then(|number| usize::try_from(number).ok())
+}
+
 fn find_bool(value: &Value, keys: &[&str]) -> Option<bool> {
     let object = value.as_object()?;
     for key in keys {
@@ -468,11 +478,9 @@ fn apply_workspace_changed(snapshot: &mut RiftSnapshot, payload: &Value) -> Rift
         return RiftApplyResult::RequiresResync;
     };
     let layout = find_string(payload, &["layout", "layout_mode", "mode"]);
-    let mut changed = false;
-
-    if snapshot.current_workspace != current_name {
-        snapshot.current_workspace = current_name.clone();
-        changed = true;
+    let mut changed = snapshot.current_workspace != current_name;
+    if changed {
+        snapshot.current_workspace.clone_from(&current_name);
     }
 
     if let Some(layout) = layout.filter(|layout| !layout.trim().is_empty())
@@ -502,8 +510,7 @@ fn apply_workspace_changed(snapshot: &mut RiftSnapshot, payload: &Value) -> Rift
         .workspaces
         .iter()
         .find(|workspace| workspace.is_current)
-        .map(|workspace| workspace.window_count)
-        .unwrap_or(snapshot.window_count);
+        .map_or(snapshot.window_count, |workspace| workspace.window_count);
 
     if changed {
         RiftApplyResult::Updated
@@ -520,8 +527,8 @@ fn apply_windows_changed(snapshot: &mut RiftSnapshot, payload: &Value) -> RiftAp
         .as_object()
         .and_then(|object| object.get("windows"))
         .and_then(Value::as_array)
-        .map(|windows| windows.len())
-        .or_else(|| find_u64(payload, &["window_count"]).map(|count| count as usize))
+        .map(Vec::len)
+        .or_else(|| find_usize(payload, &["window_count"]))
     else {
         return RiftApplyResult::RequiresResync;
     };
@@ -580,11 +587,16 @@ fn apply_stacks_changed(snapshot: &mut RiftSnapshot, payload: &Value) -> RiftApp
 }
 
 fn workspace_index_name(payload: &Value) -> Option<String> {
-    find_u64(payload, &["workspace_index", "index"]).map(|index| (index + 1).to_string())
+    find_u64(payload, &["workspace_index", "index"])
+        .map(|index| index.saturating_add(1).to_string())
 }
 
 #[cfg(target_os = "macos")]
 #[repr(C)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "fields mirror the mach_msg_header_t C layout"
+)]
 struct MachMsgHeader {
     msgh_bits: u32,
     msgh_size: u32,
@@ -615,10 +627,11 @@ impl MachClient {
         let service_name =
             CString::new(env::var("RIFT_BS_NAME").unwrap_or_else(|_| RIFT_BOOTSTRAP_NAME.into()))
                 .map_err(|_| BarrsError::Unsupported("invalid Rift bootstrap name".into()))?;
-        let mut service_port = libc::MACH_PORT_NULL as libc::mach_port_t;
-        let result =
-            unsafe { bootstrap_look_up(bootstrap_port, service_name.as_ptr(), &mut service_port) };
-        if result != 0 || service_port == libc::MACH_PORT_NULL as libc::mach_port_t {
+        let mut service_port = MACH_PORT_NULL;
+        let result = unsafe {
+            bootstrap_look_up(bootstrap_port, service_name.as_ptr(), &raw mut service_port)
+        };
+        if result != 0 || service_port == MACH_PORT_NULL {
             return Err(BarrsError::Unsupported(
                 "failed to connect to Rift Mach service".into(),
             ));
@@ -627,7 +640,7 @@ impl MachClient {
     }
 
     fn get_workspaces(&self, space_id: Option<u64>) -> Result<Value, BarrsError> {
-        self.request(json!({
+        self.request(&json!({
             "get_workspaces": { "space_id": space_id }
         }))
     }
@@ -637,7 +650,7 @@ impl MachClient {
         let response = send_request_on_port(
             self.service_port,
             reply_port,
-            json!({
+            &json!({
                 "subscribe": { "event": event.as_str() }
             }),
         );
@@ -650,7 +663,7 @@ impl MachClient {
         }
     }
 
-    fn request(&self, request: Value) -> Result<Value, BarrsError> {
+    fn request(&self, request: &Value) -> Result<Value, BarrsError> {
         let reply_port = allocate_reply_port()?;
         let response = send_request_on_port(self.service_port, reply_port, request);
         deallocate_port(reply_port);
@@ -669,9 +682,9 @@ impl Drop for MachClient {
 fn send_request_on_port(
     service_port: libc::mach_port_t,
     reply_port: libc::mach_port_t,
-    request: Value,
+    request: &Value,
 ) -> Result<Value, BarrsError> {
-    let payload = serde_json::to_vec(&request)?;
+    let payload = serde_json::to_vec(request)?;
     send_json_message(service_port, Some(reply_port), &payload)?;
     receive_response_message(reply_port)
 }
@@ -687,7 +700,10 @@ fn send_json_message(
             "Rift Mach payload exceeds 16KB".into(),
         ));
     }
-    let aligned_len = (payload.len() + 3) & !3;
+    let msgh_size = size_of::<MachMsgHeader>()
+        .checked_add(payload.len().next_multiple_of(4))
+        .and_then(|size| u32::try_from(size).ok())
+        .ok_or_else(|| BarrsError::Unsupported("Rift Mach message size overflow".into()))?;
     let mut message = SimpleMessage {
         header: MachMsgHeader {
             msgh_bits: mach_msg_bits(
@@ -698,25 +714,27 @@ fn send_json_message(
                     0
                 },
             ),
-            msgh_size: (size_of::<MachMsgHeader>() + aligned_len) as u32,
+            msgh_size,
             msgh_remote_port: service_port,
-            msgh_local_port: reply_port.unwrap_or(libc::MACH_PORT_NULL as libc::mach_port_t),
+            msgh_local_port: reply_port.unwrap_or(MACH_PORT_NULL),
             msgh_voucher_port: 0,
-            msgh_id: reply_port.unwrap_or(0) as i32,
+            msgh_id: reply_port.unwrap_or(0).cast_signed(),
         },
         data: [0; MACH_PAYLOAD_CAPACITY],
     };
-    message.data[..payload.len()].copy_from_slice(payload);
+    for (slot, byte) in message.data.iter_mut().zip(payload) {
+        *slot = *byte;
+    }
 
     let result = unsafe {
         mach_msg(
-            &mut message.header,
+            &raw mut message.header,
             MACH_SEND_MSG | MACH_SEND_TIMEOUT,
             message.header.msgh_size,
             0,
-            libc::MACH_PORT_NULL as libc::mach_port_t,
+            MACH_PORT_NULL,
             RIFT_MACH_TIMEOUT_MS,
-            libc::MACH_PORT_NULL as libc::mach_port_t,
+            MACH_PORT_NULL,
         )
     };
     if result != 0 {
@@ -764,15 +782,17 @@ fn receive_payload(
         } else {
             0
         };
+    let receive_size = u32::try_from(size_of::<SimpleMessage>())
+        .map_err(|_| BarrsError::Unsupported("Rift Mach buffer size overflow".into()))?;
     let result = unsafe {
         mach_msg(
-            &mut message.header,
+            &raw mut message.header,
             options,
             0,
-            size_of::<SimpleMessage>() as u32,
+            receive_size,
             reply_port,
             timeout_ms.unwrap_or(MACH_MSG_TIMEOUT_NONE),
-            libc::MACH_PORT_NULL as libc::mach_port_t,
+            MACH_PORT_NULL,
         )
     };
     if result != 0 {
@@ -781,11 +801,10 @@ fn receive_payload(
         )));
     }
 
-    let payload_len = message
-        .header
-        .msgh_size
-        .saturating_sub(size_of::<MachMsgHeader>() as u32) as usize;
-    let mut payload = message.data[..payload_len.min(MACH_PAYLOAD_CAPACITY)].to_vec();
+    let payload_len = usize::try_from(message.header.msgh_size)
+        .unwrap_or(usize::MAX)
+        .saturating_sub(size_of::<MachMsgHeader>());
+    let mut payload: Vec<u8> = message.data.iter().copied().take(payload_len).collect();
     while payload.last() == Some(&0) {
         payload.pop();
     }
@@ -794,9 +813,14 @@ fn receive_payload(
 
 #[cfg(target_os = "macos")]
 fn allocate_reply_port() -> Result<libc::mach_port_t, BarrsError> {
-    let mut port = libc::MACH_PORT_NULL as libc::mach_port_t;
-    let result =
-        unsafe { mach_port_allocate(mach_task_self_port(), MACH_PORT_RIGHT_RECEIVE, &mut port) };
+    let mut port = MACH_PORT_NULL;
+    let result = unsafe {
+        mach_port_allocate(
+            mach_task_self_port(),
+            MACH_PORT_RIGHT_RECEIVE,
+            &raw mut port,
+        )
+    };
     if result != 0 {
         return Err(BarrsError::Unsupported(format!(
             "failed to allocate Mach reply port ({result})"
@@ -813,13 +837,15 @@ fn mach_task_self_port() -> libc::mach_port_t {
 
 fn deallocate_port(port: SubscriptionHandle) {
     #[cfg(target_os = "macos")]
-    if port != libc::MACH_PORT_NULL as libc::mach_port_t {
+    if port != MACH_PORT_NULL {
         unsafe {
             let _ = mach_port_deallocate(mach_task_self_port(), port);
         }
     }
 }
 
+#[cfg(target_os = "macos")]
+const MACH_PORT_NULL: libc::mach_port_t = 0;
 #[cfg(target_os = "macos")]
 const MACH_MSG_TYPE_COPY_SEND: u32 = 19;
 #[cfg(target_os = "macos")]
