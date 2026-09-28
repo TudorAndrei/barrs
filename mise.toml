@@ -1,5 +1,6 @@
 [tools]
-rust = "1.97.1"
+rust = { version = "1.97.1", mr_boxington = true }
+mr-boxington = "1.19.0"
 cocogitto = "7.0.0"
 "cargo:cargo-release" = "1.1.2"
 
