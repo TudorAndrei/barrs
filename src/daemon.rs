@@ -61,7 +61,7 @@ async fn serve_connection(mut stream: UnixStream, sender: mpsc::Sender<IncomingR
         .await;
         return;
     }
-    let response = response_receiver.await.unwrap_or(Response::Error {
+    let response = response_receiver.await.unwrap_or_else(|_| Response::Error {
         message: "daemon stopped before responding".into(),
     });
     let _ = write_response(&mut stream, &response).await;
@@ -94,6 +94,11 @@ struct DaemonState<R: Renderer> {
 }
 
 impl<R: Renderer> Daemon<R> {
+    /// Creates a daemon from an already loaded config and Lua runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the daemon state cannot be initialized.
     pub fn new_loaded(
         config_path: PathBuf,
         config: Config,
@@ -130,6 +135,12 @@ impl<R: Renderer> Daemon<R> {
         Self::new_loaded(config_path, config, lua, renderer)
     }
 
+    /// Serves IPC requests and refreshes bar items until a stop request arrives.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the socket cannot be bound or removed, or if the
+    /// initial item refresh fails.
     pub async fn run(mut self) -> Result<(), BarrsError> {
         let socket_path = {
             let state = self.state.lock().await;
@@ -147,7 +158,12 @@ impl<R: Renderer> Daemon<R> {
 
         loop {
             tokio::select! {
-                result = async { self.pending_refresh.as_mut().expect("pending refresh").await }, if self.pending_refresh.is_some() => {
+                result = async {
+                    match self.pending_refresh.as_mut() {
+                        Some(pending) => pending.await,
+                        None => std::future::pending().await,
+                    }
+                }, if self.pending_refresh.is_some() => {
                     self.pending_refresh = None;
                     match result {
                         Ok(pending) => {
@@ -208,7 +224,7 @@ impl<R: Renderer> Daemon<R> {
         Ok(())
     }
 
-    async fn handle_request(&mut self, request: Request) -> Result<Response, BarrsError> {
+    async fn handle_request(&self, request: Request) -> Result<Response, BarrsError> {
         match request {
             Request::Ping => Ok(Response::Pong),
             Request::Stop => Ok(Response::Ok {
@@ -248,7 +264,7 @@ impl<R: Renderer> Daemon<R> {
         }
     }
 
-    async fn reload(&mut self) -> Result<(), BarrsError> {
+    async fn reload(&self) -> Result<(), BarrsError> {
         let (config, lua) = load_config_with_runtime(&self.config_path)?;
         let backend = select_backend();
         let backend_kind = backend.kind();
@@ -274,10 +290,11 @@ impl<R: Renderer> Daemon<R> {
             .collect();
         state.rift_snapshot = rift_snapshot;
         state.last_rift_signature = rift_signature;
+        drop(state);
         Ok(())
     }
 
-    async fn refresh_all_items(&mut self) -> Result<(), BarrsError> {
+    async fn refresh_all_items(&self) -> Result<(), BarrsError> {
         let config = {
             let state = self.state.lock().await;
             state.config.clone()
@@ -296,6 +313,7 @@ impl<R: Renderer> Daemon<R> {
         state.rift_dirty = false;
         state.rift_debounce_deadline = None;
         state.last_rift_signature = rift_signature;
+        drop(state);
         Ok(())
     }
 
@@ -345,7 +363,7 @@ impl<R: Renderer> Daemon<R> {
         Ok(())
     }
 
-    async fn apply_refresh(&mut self, pending: PendingRefresh) -> Result<(), BarrsError> {
+    async fn apply_refresh(&self, pending: PendingRefresh) -> Result<(), BarrsError> {
         let mut state = self.state.lock().await;
         if !refresh_epoch_matches(state.config_epoch, pending.epoch) {
             return Ok(());
@@ -364,11 +382,12 @@ impl<R: Renderer> Daemon<R> {
             &pending.item_ids,
             now,
         );
+        drop(state);
 
         Ok(())
     }
 
-    async fn process_renderer_events(&mut self) -> Result<(), BarrsError> {
+    async fn process_renderer_events(&self) -> Result<(), BarrsError> {
         let events = {
             let mut state = self.state.lock().await;
             state.renderer.drain_events()?
@@ -379,13 +398,13 @@ impl<R: Renderer> Daemon<R> {
         Ok(())
     }
 
-    async fn process_rift_events(&mut self) -> Result<(), BarrsError> {
+    async fn process_rift_events(&self) -> Result<(), BarrsError> {
         let now = Instant::now();
         let mut state = self.state.lock().await;
         let events = state
             .rift_subscription
             .as_ref()
-            .map(|subscription| subscription.drain())
+            .map(RiftSubscription::drain)
             .unwrap_or_default();
 
         if !events.is_empty() {
@@ -465,11 +484,12 @@ impl<R: Renderer> Daemon<R> {
         let mut state = self.state.lock().await;
         finish_rift_debounce(&mut state);
         state.last_rift_signature = Some(next_signature);
+        drop(state);
         Ok(())
     }
 
     async fn refresh_selected_items_with_rift(
-        &mut self,
+        &self,
         item_ids: &[String],
         rift_snapshot: Option<&RiftSnapshot>,
     ) -> Result<(), BarrsError> {
@@ -494,10 +514,11 @@ impl<R: Renderer> Daemon<R> {
             state.renderer.render_item(&snapshot)?;
             state.item_states.insert(item_id, snapshot);
         }
+        drop(state);
         Ok(())
     }
 
-    async fn dispatch_event(&mut self, payload: EventPayload) -> Result<(), BarrsError> {
+    async fn dispatch_event(&self, payload: EventPayload) -> Result<(), BarrsError> {
         let (config, cached_rift_snapshot) = {
             let state = self.state.lock().await;
             (state.config.clone(), state.rift_snapshot.clone())
@@ -594,7 +615,6 @@ async fn reclaim_stale_socket(path: &Path) -> Result<(), BarrsError> {
     )
     .await
     {
-        Ok(Ok(Response::Pong)) => return Err(BarrsError::DaemonAlreadyRunning),
         Ok(Ok(_)) => return Err(BarrsError::DaemonAlreadyRunning),
         Ok(Err(BarrsError::DaemonUnavailable)) | Err(_) => {}
         Ok(Err(error)) => return Err(error),
@@ -620,7 +640,8 @@ fn build_refresh_deadlines(
         .iter()
         .filter_map(|item| {
             item_refresh_interval(item, backend)
-                .map(|refresh_interval| (item.id.clone(), now + refresh_interval))
+                .and_then(|refresh_interval| now.checked_add(refresh_interval))
+                .map(|deadline| (item.id.clone(), deadline))
         })
         .collect()
 }
@@ -633,11 +654,11 @@ fn due_item_ids(deadlines: &HashMap<String, Instant>, now: Instant) -> Vec<Strin
         .collect()
 }
 
-fn can_start_refresh(refresh_is_pending: bool, due_items: &[String]) -> bool {
+const fn can_start_refresh(refresh_is_pending: bool, due_items: &[String]) -> bool {
     !refresh_is_pending && !due_items.is_empty()
 }
 
-fn refresh_epoch_matches(current_epoch: u64, pending_epoch: u64) -> bool {
+const fn refresh_epoch_matches(current_epoch: u64, pending_epoch: u64) -> bool {
     current_epoch == pending_epoch
 }
 
@@ -651,8 +672,9 @@ fn advance_refresh_deadlines(
     for item_id in item_ids {
         if let Some(item) = config.items.iter().find(|item| item.id == *item_id)
             && let Some(refresh_interval) = item_refresh_interval(item, backend)
+            && let Some(deadline) = now.checked_add(refresh_interval)
         {
-            deadlines.insert(item_id.clone(), now + refresh_interval);
+            deadlines.insert(item_id.clone(), deadline);
         }
     }
 }
@@ -672,12 +694,12 @@ fn rift_debounce_transition(
     if requires_resync {
         return Some(RiftDebounceTransition {
             dirty: snapshot_available,
-            deadline: Some(now + Duration::from_millis(RIFT_DEBOUNCE_MS)),
+            deadline: now.checked_add(Duration::from_millis(RIFT_DEBOUNCE_MS)),
         });
     }
     changed.then(|| RiftDebounceTransition {
         dirty: true,
-        deadline: Some(now + Duration::from_millis(RIFT_DEBOUNCE_MS)),
+        deadline: now.checked_add(Duration::from_millis(RIFT_DEBOUNCE_MS)),
     })
 }
 
@@ -692,9 +714,9 @@ fn rift_signature_changed(last_signature: Option<u64>, next_signature: u64) -> b
 fn item_refresh_interval(item: &ItemConfig, backend: RiftBackendKind) -> Option<Duration> {
     item.interval
         .map(|interval| Duration::from_secs(interval.max(1)))
-        .or(match item.plugin.as_ref().map(|plugin| plugin.kind) {
+        .or_else(|| match item.plugin.as_ref().map(|plugin| plugin.kind) {
             Some(PluginKind::Time) => Some(Duration::from_secs(1)),
-            Some(PluginKind::Date) => Some(Duration::from_secs(30 * 60)),
+            Some(PluginKind::Date) => Some(Duration::from_mins(30)),
             Some(PluginKind::Cpu | PluginKind::Gpu) => Some(Duration::from_secs(2)),
             Some(PluginKind::Battery) => Some(Duration::from_secs(10)),
             Some(PluginKind::RiftWorkspaces | PluginKind::RiftLayout) => {
@@ -723,7 +745,7 @@ fn has_rift_items(config: &Config) -> bool {
     config.items.iter().any(is_rift_item)
 }
 
-fn finish_rift_debounce<R: Renderer>(state: &mut DaemonState<R>) {
+const fn finish_rift_debounce<R: Renderer>(state: &mut DaemonState<R>) {
     state.rift_dirty = false;
     state.rift_debounce_deadline = None;
 }
@@ -1477,9 +1499,8 @@ return {{
         write_evaluation_config(&config_path, &socket_path, &evaluation_path, &handler_path);
 
         let (config, lua) = crate::config::load_config_with_runtime(&config_path).expect("load");
-        let mut daemon =
-            Daemon::new_loaded(config_path.clone(), config, lua, NoopRenderer::default())
-                .expect("daemon");
+        let daemon = Daemon::new_loaded(config_path.clone(), config, lua, NoopRenderer::default())
+            .expect("daemon");
         assert_eq!(
             fs::read_to_string(&evaluation_path).expect("evaluation"),
             "1"
@@ -1525,7 +1546,7 @@ return {{
         write_config(&config_path, &socket_path);
         let config = load_config(&config_path).expect("config");
         assert!(!super::has_rift_items(&config));
-        let mut daemon =
+        let daemon =
             Daemon::new(config_path.clone(), config, NoopRenderer::default()).expect("daemon");
         {
             let mut state = daemon.state.lock().await;
@@ -1540,6 +1561,7 @@ return {{
         assert!(!state.rift_dirty);
         assert_eq!(state.rift_debounce_deadline, None);
         assert!(state.rift_subscription.is_none());
+        drop(state);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1550,7 +1572,7 @@ return {{
         write_rift_config(&config_path, &socket_path);
         let config = load_config(&config_path).expect("config");
         assert!(super::has_rift_items(&config));
-        let mut daemon =
+        let daemon =
             Daemon::new(config_path.clone(), config, NoopRenderer::default()).expect("daemon");
         let initial = test_rift_snapshot("one");
         {
@@ -1566,6 +1588,7 @@ return {{
             let state = daemon.state.lock().await;
             assert!(!state.rift_dirty);
             assert_eq!(state.rift_debounce_deadline, None);
+            drop(state);
         }
 
         let changed = test_rift_snapshot("two");
@@ -1584,6 +1607,7 @@ return {{
         assert!(!state.rift_dirty);
         assert_eq!(state.rift_debounce_deadline, None);
         assert_eq!(state.last_rift_signature, Some(changed.signature()));
+        drop(state);
     }
 
     fn test_rift_snapshot(current_workspace: &str) -> crate::rift::RiftSnapshot {
@@ -1608,7 +1632,7 @@ return {{
         write_item_config(&config_path, &socket_path, &["old", "retained"]);
 
         let config = load_config(&config_path).expect("config");
-        let mut daemon =
+        let daemon =
             Daemon::new(config_path.clone(), config, NativeRenderer::default()).expect("daemon");
         daemon.refresh_all_items().await.expect("initial render");
         write_item_config(&config_path, &socket_path, &["retained", "new"]);
@@ -1626,6 +1650,7 @@ return {{
             .iter()
             .map(|item| item.snapshot.id.clone())
             .collect::<Vec<_>>();
+        drop(state);
         rendered_ids.sort();
         assert_eq!(rendered_ids, vec!["new", "retained"]);
     }
@@ -1644,7 +1669,7 @@ return {{
             initializations: Arc::clone(&initializations),
         };
         let config = load_config(&config_path).expect("config");
-        let mut daemon = Daemon::new(config_path.clone(), config, renderer).expect("daemon");
+        let daemon = Daemon::new(config_path.clone(), config, renderer).expect("daemon");
         daemon.refresh_all_items().await.expect("initial render");
         assert_eq!(initializations.load(Ordering::SeqCst), 1);
 
@@ -1661,6 +1686,7 @@ return {{
         assert!(state.item_states.contains_key("retained"));
         assert!(!state.item_states.contains_key("old"));
         assert!(!state.item_states.contains_key("new"));
+        drop(state);
         assert_eq!(initializations.load(Ordering::SeqCst), 2);
     }
 
@@ -1673,7 +1699,7 @@ return {{
         write_trigger_config(&config_path, &socket_path, &marker_path);
 
         let config = load_config(&config_path).expect("config");
-        let mut daemon =
+        let daemon =
             Daemon::new(config_path.clone(), config, NoopRenderer::default()).expect("daemon");
 
         let error = daemon
@@ -1810,7 +1836,7 @@ return {{
 
         let config = Config {
             socket_path: None,
-            bar: Default::default(),
+            bar: crate::config::BarConfig::default(),
             items: vec![
                 scheduled_item("due", PluginKind::Time),
                 scheduled_item("failed", PluginKind::Time),
@@ -1875,7 +1901,7 @@ return {{
         write_hover_config(&config_path, &socket_path);
 
         let config = load_config(&config_path).expect("config");
-        let mut daemon =
+        let daemon =
             Daemon::new(config_path.clone(), config, NativeRenderer::default()).expect("daemon");
         daemon.refresh_all_items().await.expect("initial render");
 
@@ -1900,6 +1926,7 @@ return {{
             state.renderer.surface_state().active_hover_item.as_deref(),
             Some("clock")
         );
+        drop(state);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1915,7 +1942,7 @@ return {{
         };
 
         let config = load_config(&config_path).expect("config");
-        let mut daemon = Daemon::new(config_path.clone(), config, renderer).expect("daemon");
+        let daemon = Daemon::new(config_path.clone(), config, renderer).expect("daemon");
         daemon.refresh_all_items().await.expect("initial render");
         assert_eq!(renders.load(Ordering::SeqCst), 1);
 
@@ -1947,7 +1974,7 @@ return {{
         write_hover_update_config(&config_path, &socket_path, &marker_path);
 
         let config = load_config(&config_path).expect("config");
-        let mut daemon =
+        let daemon =
             Daemon::new(config_path.clone(), config, NativeRenderer::default()).expect("daemon");
         daemon.refresh_all_items().await.expect("initial render");
         let event = crate::ipc::EventPayload {
@@ -2044,7 +2071,7 @@ return {{
                 &make_item(crate::config::PluginKind::Date),
                 crate::rift::RiftBackendKind::Mach
             ),
-            Some(std::time::Duration::from_secs(30 * 60))
+            Some(std::time::Duration::from_mins(30))
         );
     }
 
@@ -2082,7 +2109,7 @@ return {{
         };
         let config = Config {
             socket_path: None,
-            bar: Default::default(),
+            bar: crate::config::BarConfig::default(),
             items: vec![
                 make_item("time", PluginKind::Time),
                 make_item("workspaces", PluginKind::RiftWorkspaces),
