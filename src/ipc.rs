@@ -11,6 +11,7 @@ use crate::cli::TriggerEvent;
 use crate::error::BarrsError;
 use crate::rift::RiftBackendKind;
 
+#[must_use]
 pub fn default_socket_path() -> PathBuf {
     env::temp_dir().join("barrs.sock")
 }
@@ -30,6 +31,7 @@ pub enum RequestFrameError {
 }
 
 impl RequestFrameError {
+    #[must_use]
     pub fn response(self) -> Response {
         let message = match self {
             Self::TimedOut => "request read timed out",
@@ -55,6 +57,7 @@ pub struct EventPayload {
 }
 
 impl EventPayload {
+    #[must_use]
     pub fn from_trigger(item_id: String, event: TriggerEvent) -> Self {
         Self {
             item_id,
@@ -66,6 +69,7 @@ impl EventPayload {
     }
 }
 
+#[must_use]
 pub fn current_timestamp_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -108,6 +112,10 @@ pub struct MouseState {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one flag per modifier key is the IPC wire format"
+)]
 pub struct Modifiers {
     pub shift: bool,
     pub control: bool,
@@ -149,6 +157,12 @@ pub enum Response {
     },
 }
 
+/// Reads one newline-terminated JSON request frame.
+///
+/// # Errors
+///
+/// Returns a [`RequestFrameError`] when the read times out, fails, ends early,
+/// exceeds [`MAX_REQUEST_FRAME_BYTES`], or does not hold a valid request.
 pub async fn read_request_frame<R: AsyncRead + Unpin>(
     reader: &mut R,
 ) -> Result<Request, RequestFrameError> {
@@ -180,21 +194,24 @@ async fn read_request_frame_inner<R: AsyncRead + Unpin>(
             return Err(RequestFrameError::TooLarge);
         }
         let read_capacity = remaining.min(buffer.len());
+        let chunk = buffer
+            .get_mut(..read_capacity)
+            .ok_or(RequestFrameError::Io)?;
         let bytes = reader
-            .read(&mut buffer[..read_capacity])
+            .read(chunk)
             .await
             .map_err(|_| RequestFrameError::Io)?;
         if bytes == 0 {
             return Err(RequestFrameError::EndOfFile);
         }
-        frame.extend_from_slice(&buffer[..bytes]);
+        frame.extend_from_slice(chunk.get(..bytes).ok_or(RequestFrameError::Io)?);
 
         if let Some(newline) = frame.iter().position(|byte| *byte == b'\n') {
             if newline > max_frame_bytes {
                 return Err(RequestFrameError::TooLarge);
             }
-            let request = std::str::from_utf8(&frame[..newline])
-                .map_err(|_| RequestFrameError::InvalidUtf8)?;
+            let line = frame.get(..newline).ok_or(RequestFrameError::Io)?;
+            let request = std::str::from_utf8(line).map_err(|_| RequestFrameError::InvalidUtf8)?;
             return serde_json::from_str(request).map_err(|_| RequestFrameError::InvalidJson);
         }
         if frame.len() > max_frame_bytes {
@@ -203,6 +220,11 @@ async fn read_request_frame_inner<R: AsyncRead + Unpin>(
     }
 }
 
+/// Writes `response` as one newline-terminated JSON frame.
+///
+/// # Errors
+///
+/// Returns an error when serialization or the write fails.
 pub async fn write_response<W: AsyncWrite + Unpin>(
     writer: &mut W,
     response: &Response,
@@ -214,6 +236,12 @@ pub async fn write_response<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+/// Sends `request` to the daemon socket and reads one response frame.
+///
+/// # Errors
+///
+/// Returns [`BarrsError::DaemonUnavailable`] when the daemon does not answer,
+/// or an error when serialization or socket I/O fails.
 pub async fn send_request(socket_path: &Path, request: &Request) -> Result<Response, BarrsError> {
     let mut stream = UnixStream::connect(socket_path)
         .await
