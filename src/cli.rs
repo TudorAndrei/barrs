@@ -1,20 +1,21 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use usage::{Args, Cli as UsageCli, Subcommands, ValueEnum};
 
 use crate::render::RendererKind;
 
-#[derive(Debug, Parser)]
-#[command(name = "barrs", version, about = "A low-overhead macOS bar daemon")]
+/// A low-overhead macOS bar daemon
+#[derive(Debug, UsageCli)]
+#[usage(bin = "barrs", version)]
 pub struct Cli {
-    #[command(subcommand)]
+    #[usage(subcommand)]
     pub command: Command,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Subcommands)]
 pub enum Command {
     Start(StartArgs),
-    #[command(hide = true)]
+    #[usage(hide = true)]
     Run(RunArgs),
     Stop(SocketArgs),
     Reload(SocketArgs),
@@ -28,41 +29,41 @@ pub enum Command {
 
 #[derive(Debug, Clone, Args)]
 pub struct SocketArgs {
-    #[arg(long)]
+    #[usage(long)]
     pub socket: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args)]
 pub struct ConfigArgs {
-    #[arg(long)]
+    #[usage(long)]
     pub config: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args)]
 pub struct StartArgs {
-    #[arg(long)]
+    #[usage(long)]
     pub config: Option<PathBuf>,
-    #[arg(long)]
+    #[usage(long)]
     pub socket: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args)]
 pub struct RunArgs {
-    #[arg(long)]
+    #[usage(long)]
     pub config: Option<PathBuf>,
-    #[arg(long)]
+    #[usage(long)]
     pub socket: Option<PathBuf>,
-    #[arg(long, value_enum, default_value_t = RendererKind::Native)]
+    #[usage(long, value_enum, default = "native")]
     pub renderer: RendererKind,
 }
 
 #[derive(Debug, Clone, Args)]
 pub struct ItemArgs {
-    #[command(subcommand)]
+    #[usage(subcommand)]
     pub command: ItemCommand,
 }
 
-#[derive(Debug, Clone, Subcommand)]
+#[derive(Debug, Clone, Subcommands)]
 pub enum ItemCommand {
     Trigger(TriggerArgs),
 }
@@ -70,8 +71,9 @@ pub enum ItemCommand {
 #[derive(Debug, Clone, Args)]
 pub struct TriggerArgs {
     pub item_id: String,
+    #[usage(value_enum)]
     pub event: TriggerEvent,
-    #[arg(long)]
+    #[usage(long)]
     pub socket: Option<PathBuf>,
 }
 
@@ -87,25 +89,30 @@ pub enum TriggerEvent {
 
 #[derive(Debug, Clone, Args)]
 pub struct RiftArgs {
-    #[command(subcommand)]
+    #[usage(subcommand)]
     pub command: RiftCommand,
 }
 
-#[derive(Debug, Clone, Subcommand)]
+#[derive(Debug, Clone, Subcommands)]
 pub enum RiftCommand {
     Backend(SocketArgs),
 }
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
+    use std::ffi::OsStr;
 
     use super::{Cli, Command, ItemCommand, RiftCommand, TriggerEvent};
     use crate::render::RendererKind;
 
+    fn parse(words: &[&str]) -> Cli {
+        let argv: Vec<&OsStr> = words.iter().map(OsStr::new).collect();
+        Cli::parse_from(&argv).expect("valid command line")
+    }
+
     #[test]
     fn parses_item_trigger() {
-        let cli = Cli::parse_from(["barrs", "item", "trigger", "cpu", "hover-enter"]);
+        let cli = parse(&["item", "trigger", "cpu", "hover-enter"]);
         match cli.command {
             Command::Item(item) => match item.command {
                 ItemCommand::Trigger(args) => {
@@ -119,7 +126,7 @@ mod tests {
 
     #[test]
     fn parses_rift_backend() {
-        let cli = Cli::parse_from(["barrs", "rift", "backend"]);
+        let cli = parse(&["rift", "backend"]);
         match cli.command {
             Command::Rift(args) => match args.command {
                 RiftCommand::Backend(_) => {}
@@ -130,9 +137,18 @@ mod tests {
 
     #[test]
     fn parses_renderer_selection() {
-        let cli = Cli::parse_from(["barrs", "run", "--renderer", "noop"]);
+        let cli = parse(&["run", "--renderer", "noop"]);
         match cli.command {
             Command::Run(args) => assert_eq!(args.renderer, RendererKind::Noop),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn defaults_renderer_to_native() {
+        let cli = parse(&["run"]);
+        match cli.command {
+            Command::Run(args) => assert_eq!(args.renderer, RendererKind::Native),
             other => panic!("unexpected command: {other:?}"),
         }
     }

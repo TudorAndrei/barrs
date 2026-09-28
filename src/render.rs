@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(target_os = "macos")]
 use std::time::{Duration, Instant};
 
-use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use usage::ValueEnum;
 
 use crate::config::{BarSection, Config, HoverConfig, ItemConfig};
 use crate::error::BarrsError;
