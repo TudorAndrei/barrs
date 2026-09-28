@@ -22,12 +22,24 @@ fn unavailable_snapshot() -> Value {
 }
 
 pub trait Plugin: Send + Sync {
+    /// Returns the current plugin state as JSON for the item.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plugin cannot read its data source.
     fn snapshot(&self) -> Result<Value, BarrsError>;
+
+    /// Handles an input event sent to the item.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plugin cannot process the event.
     fn handle_event(&mut self, _event: &EventPayload) -> Result<(), BarrsError> {
         Ok(())
     }
 }
 
+#[must_use]
 pub fn from_item_config(item: &ItemConfig, rift: Option<&RiftSnapshot>) -> Option<Box<dyn Plugin>> {
     let binding = item.plugin.as_ref()?;
     match binding.kind {
@@ -144,26 +156,28 @@ fn parse_cpu_output(output: &str) -> Option<Value> {
         .filter_map(|part| part.trim().split('%').next())
         .filter_map(|number| number.trim().parse::<f64>().ok())
         .sum::<f64>();
-    let rounded = usage.round() as i32;
+    let rounded = usage.round();
     Some(json!({
-        "text": format!("{rounded}%"),
+        "text": format!("{rounded:.0}%"),
         "usage_percent": usage
     }))
 }
 
 fn format_local_time(format: &str) -> Result<String, BarrsError> {
-    let timestamp = SystemTime::now()
+    let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|err| BarrsError::Unsupported(err.to_string()))?
-        .as_secs() as libc::time_t;
+        .as_secs();
+    let timestamp = libc::time_t::try_from(seconds)
+        .map_err(|_| BarrsError::Unsupported("timestamp out of range".into()))?;
     let mut local_time = std::mem::MaybeUninit::<libc::tm>::uninit();
     let format =
         CString::new(format).map_err(|_| BarrsError::Unsupported("format contains NUL".into()))?;
-    let mut buffer = [0 as libc::c_char; 256];
+    let mut buffer: [libc::c_char; 256] = [0; 256];
 
     // SAFETY: The pointers are valid for writes and remain alive for the duration of the calls.
     unsafe {
-        if libc::localtime_r(&timestamp, local_time.as_mut_ptr()).is_null() {
+        if libc::localtime_r(&raw const timestamp, local_time.as_mut_ptr()).is_null() {
             return Err(BarrsError::Unsupported("failed to read local time".into()));
         }
         let written = libc::strftime(
@@ -219,12 +233,11 @@ fn gpu_snapshot_from_ioreg() -> Option<Value> {
 
 fn parse_gpu_output(output: &str) -> Option<Value> {
     let marker = "\"Device Utilization %\"=";
-    let start = output.find(marker)? + marker.len();
-    let tail = &output[start..];
+    let (_, tail) = output.split_once(marker)?;
     let number: String = tail
         .chars()
         .skip_while(|ch| ch.is_whitespace())
-        .take_while(|ch| ch.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
         .collect();
     let utilization = number.parse::<u8>().ok()?;
     Some(json!({
@@ -447,7 +460,7 @@ mod tests {
         let snapshot = plugin.snapshot().expect("snapshot");
         let text = snapshot["text"].as_str().expect("time text");
         assert_eq!(text.len(), 5);
-        assert_eq!(&text[2..3], ":");
+        assert_eq!(text.chars().nth(2), Some(':'));
     }
 
     #[test]
