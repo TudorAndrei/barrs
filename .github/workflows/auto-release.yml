@@ -21,8 +21,8 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' || (
         github.actor != 'github-actions[bot]' &&
-        !startsWith(github.event.head_commit.message, 'Release ') &&
-        !startsWith(github.event.head_commit.message, 'Update Homebrew formula for ')
+        !startsWith(github.event.head_commit.message, 'chore(version): ') &&
+        !startsWith(github.event.head_commit.message, 'chore(brew): ')
       )
 
     steps:
@@ -44,6 +44,15 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Cut release
+        run: mise run release-auto
+
+      # Tags pushed with GITHUB_TOKEN do not start other workflows.
+      - name: Start release build
         env:
           GH_TOKEN: ${{ github.token }}
-        run: mise run release-auto
+        run: |
+          set -euo pipefail
+          tag="$(git tag --points-at HEAD --list 'v*')"
+          if [ -n "${tag}" ]; then
+            gh workflow run release.yml --ref "${tag}" -f "tag=${tag}"
+          fi

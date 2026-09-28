@@ -19,7 +19,7 @@ run = "cog bump --dry-run --auto"
 
 [tasks.release-auto]
 description = "Cut a release from conventional commits"
-run = "bash scripts/release-auto.sh"
+run = "cog bump --auto"
 
 [tasks.check]
 description = "Run the full locked Rust quality gate"

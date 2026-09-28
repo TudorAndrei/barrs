@@ -155,5 +155,5 @@ jobs:
             exit 0
           fi
           git add Formula/barrs.rb
-          git commit -m "Update Homebrew formula for ${TAG}"
+          git commit -m "chore(brew): update formula for ${TAG}"
           git push origin "${DEFAULT_BRANCH}"

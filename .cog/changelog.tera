@@ -1,0 +1,19 @@
+{% import "macros" as macros -%}
+
+{% if version.tag -%}
+## [{{ version.tag | trim_start_matches(pat="v") }}]({{ repository_url }}/releases/tag/{{ version.tag }}) - {{ date | date(format="%Y-%m-%d") }}
+{% else -%}
+## Unreleased
+{% endif -%}
+{% for value in commits | group_by_type %}
+### {{ value.0 | upper_first }}
+
+{% for scope, scoped_commits in value.1 | group_by(attribute="scope") -%}
+{% for commit in scoped_commits | sort(attribute="scope") -%}
+{{ macros::remote(commit=commit) }}
+{% endfor -%}
+{% endfor -%}
+{% for commit in value.1 | unscoped -%}
+{{ macros::remote(commit=commit) }}
+{% endfor -%}
+{% endfor -%}
