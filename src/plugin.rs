@@ -175,26 +175,29 @@ fn format_local_time(format: &str) -> Result<String, BarrsError> {
         CString::new(format).map_err(|_| BarrsError::Unsupported("format contains NUL".into()))?;
     let mut buffer: [libc::c_char; 256] = [0; 256];
 
-    // SAFETY: The pointers are valid for writes and remain alive for the duration of the calls.
-    unsafe {
-        if libc::localtime_r(&raw const timestamp, local_time.as_mut_ptr()).is_null() {
-            return Err(BarrsError::Unsupported("failed to read local time".into()));
-        }
-        let written = libc::strftime(
+    // SAFETY: `timestamp` is a valid `time_t`, and `local_time` is valid for writes of one `tm`.
+    // Both stay alive for the whole call.
+    if unsafe { libc::localtime_r(&raw const timestamp, local_time.as_mut_ptr()) }.is_null() {
+        return Err(BarrsError::Unsupported("failed to read local time".into()));
+    }
+    // SAFETY: `localtime_r` succeeded, so `local_time` is initialized. `buffer` is valid for
+    // writes of `buffer.len()` bytes, and `format` is a NUL-terminated C string.
+    let written = unsafe {
+        libc::strftime(
             buffer.as_mut_ptr(),
             buffer.len(),
             format.as_ptr(),
             local_time.as_ptr(),
-        );
-        if written == 0 {
-            return Err(BarrsError::Unsupported(
-                "failed to format local time".into(),
-            ));
-        }
-        Ok(CStr::from_ptr(buffer.as_ptr())
-            .to_string_lossy()
-            .into_owned())
+        )
+    };
+    if written == 0 {
+        return Err(BarrsError::Unsupported(
+            "failed to format local time".into(),
+        ));
     }
+    // SAFETY: A non-zero `strftime` result means it wrote a NUL-terminated string into `buffer`.
+    let formatted = unsafe { CStr::from_ptr(buffer.as_ptr()) };
+    Ok(formatted.to_string_lossy().into_owned())
 }
 
 fn battery_snapshot_from_pmset() -> Option<Value> {

@@ -798,6 +798,8 @@ impl Drop for AppKitHost {
         }
 
         if let Some(flag) = self.display_reconfiguration_pending.as_ref() {
+            // SAFETY: The callback and `user_info` match the registration. The boxed flag is still
+            // alive, because fields drop only after this method returns.
             unsafe {
                 CGDisplayRemoveReconfigurationCallback(
                     Some(display_reconfiguration_callback),
@@ -809,6 +811,10 @@ impl Drop for AppKitHost {
     }
 }
 
+/// # Safety
+///
+/// `user_info` must be null or come from [`atomic_flag_user_info`] on an `AtomicBool` that stays
+/// alive until the callback is removed.
 #[cfg(target_os = "macos")]
 unsafe extern "C-unwind" fn display_reconfiguration_callback(
     _display: u32,
@@ -831,6 +837,8 @@ unsafe extern "C-unwind" fn display_reconfiguration_callback(
         | CGDisplayChangeSummaryFlags::DesktopShapeChangedFlag;
 
     if flags.intersects(relevant) {
+        // SAFETY: The caller contract says a non-null `user_info` points to a live `AtomicBool`.
+        // The flag is only accessed through shared atomic operations.
         let pending = unsafe { &*user_info.cast_const().cast::<AtomicBool>() };
         pending.store(true, Ordering::Release);
     }
@@ -851,6 +859,8 @@ impl AppKitHost {
         let flag = self
             .display_reconfiguration_pending
             .get_or_insert_with(|| Box::new(AtomicBool::new(false)));
+        // SAFETY: The flag is boxed and stays in `self` until `Drop` removes this callback, and the
+        // box is never replaced. Thus `user_info` stays valid while the callback is registered.
         let result = unsafe {
             CGDisplayRegisterReconfigurationCallback(
                 Some(display_reconfiguration_callback),
@@ -944,6 +954,8 @@ impl AppKitHost {
             let Some(event) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
                 mask,
                 None,
+                // SAFETY: Foundation initializes this constant string when it loads, and the
+                // value never changes.
                 unsafe { NSDefaultRunLoopMode },
                 true,
             ) else {
@@ -1274,6 +1286,9 @@ fn create_bar_window(
     frame: &WindowFrame,
     background: Option<&str>,
 ) -> objc2::rc::Retained<NSWindow> {
+    // SAFETY: The window is allocated on the main thread. objc2 marks this init unsafe because
+    // AppKit releases a window when it closes, by default. The next statement turns that off
+    // before the window can close.
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
@@ -1283,6 +1298,8 @@ fn create_bar_window(
             false,
         )
     };
+    // SAFETY: `false` stops AppKit from releasing the window on close, so `Retained` stays its
+    // only owner.
     unsafe {
         window.setReleasedWhenClosed(false);
     }
@@ -1303,8 +1320,11 @@ fn apply_backstop_level(window: &NSWindow) {
     if window_id == 0 {
         return;
     }
+    // SAFETY: This SkyLight call takes no arguments and returns the process connection ID.
+    let cid = unsafe { SLSMainConnectionID() };
+    // SAFETY: All arguments are integers, and no pointers are passed. An unknown window ID gives an
+    // error code, not undefined behavior.
     unsafe {
-        let cid = SLSMainConnectionID();
         SLSSetWindowLevel(cid, window_id, BACKSTOP_MENU_LEVEL);
     }
 }
@@ -1416,6 +1436,8 @@ fn create_hover_panel(
         NSBackingStoreType::Buffered,
         false,
     );
+    // SAFETY: `false` stops AppKit from releasing the panel on close, so `Retained` stays its
+    // only owner.
     unsafe {
         panel_window.setReleasedWhenClosed(false);
     }
@@ -2913,6 +2935,7 @@ mod tests {
     fn display_reconfiguration_callback_marks_relevant_changes_pending() {
         let pending = AtomicBool::new(false);
 
+        // SAFETY: `pending` stays alive on the stack for the whole call.
         unsafe {
             super::display_reconfiguration_callback(
                 1,
@@ -2923,6 +2946,7 @@ mod tests {
         assert!(pending.load(Ordering::Acquire));
 
         pending.store(false, Ordering::Release);
+        // SAFETY: `pending` stays alive on the stack for the whole call.
         unsafe {
             super::display_reconfiguration_callback(
                 1,

@@ -168,13 +168,20 @@ fn spawn_background_process(args: RunArgs) -> Result<(), BarrsError> {
         command.arg("--socket").arg(socket);
     }
     #[cfg(unix)]
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
+    {
+        let detach = || {
+            // SAFETY: `setsid` takes no arguments and only changes the session of the calling
+            // process.
+            if unsafe { libc::setsid() } == -1 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
-        });
+        };
+        // SAFETY: The hook runs in the forked child before `exec`. It only calls `setsid`, which
+        // is async-signal-safe, and does not allocate or take locks.
+        unsafe {
+            command.pre_exec(detach);
+        }
     }
     let mut child = command.spawn()?;
     let stdout = child

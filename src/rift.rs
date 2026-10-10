@@ -609,6 +609,10 @@ struct MachMsgHeader {
 #[cfg(target_os = "macos")]
 const MACH_PAYLOAD_CAPACITY: usize = MAX_MESSAGE_SIZE - size_of::<MachMsgHeader>();
 
+// `send_json_message` rounds the payload up to 4 bytes and relies on this to stay in bounds.
+#[cfg(target_os = "macos")]
+const _: () = assert!(MACH_PAYLOAD_CAPACITY.is_multiple_of(4));
+
 #[cfg(target_os = "macos")]
 #[repr(C)]
 struct SimpleMessage {
@@ -628,6 +632,8 @@ impl MachClient {
             CString::new(env::var("RIFT_BS_NAME").unwrap_or_else(|_| RIFT_BOOTSTRAP_NAME.into()))
                 .map_err(|_| BarrsError::Unsupported("invalid Rift bootstrap name".into()))?;
         let mut service_port = MACH_PORT_NULL;
+        // SAFETY: `service_name` is a NUL-terminated C string and `service_port` is valid for
+        // writes; both outlive the call. libsystem sets `bootstrap_port` before `main`.
         let result = unsafe {
             bootstrap_look_up(bootstrap_port, service_name.as_ptr(), &raw mut service_port)
         };
@@ -726,9 +732,12 @@ fn send_json_message(
         *slot = *byte;
     }
 
+    // SAFETY: The header pointer comes from the whole `#[repr(C)]` message, whose first field is
+    // the header. The kernel reads `msgh_size` bytes, and `msgh_size` is at most the size of
+    // `SimpleMessage` because the payload length was checked against the capacity above.
     let result = unsafe {
         mach_msg(
-            &raw mut message.header,
+            (&raw mut message).cast::<MachMsgHeader>(),
             MACH_SEND_MSG | MACH_SEND_TIMEOUT,
             message.header.msgh_size,
             0,
@@ -784,9 +793,11 @@ fn receive_payload(
         };
     let receive_size = u32::try_from(size_of::<SimpleMessage>())
         .map_err(|_| BarrsError::Unsupported("Rift Mach buffer size overflow".into()))?;
+    // SAFETY: The header pointer comes from the whole `#[repr(C)]` message, and the kernel writes
+    // at most `receive_size` bytes, which is the size of `SimpleMessage`.
     let result = unsafe {
         mach_msg(
-            &raw mut message.header,
+            (&raw mut message).cast::<MachMsgHeader>(),
             options,
             0,
             receive_size,
@@ -814,6 +825,7 @@ fn receive_payload(
 #[cfg(target_os = "macos")]
 fn allocate_reply_port() -> Result<libc::mach_port_t, BarrsError> {
     let mut port = MACH_PORT_NULL;
+    // SAFETY: `port` is valid for writes for the whole call, and the task port is our own.
     let result = unsafe {
         mach_port_allocate(
             mach_task_self_port(),
@@ -831,12 +843,15 @@ fn allocate_reply_port() -> Result<libc::mach_port_t, BarrsError> {
 
 #[cfg(target_os = "macos")]
 fn mach_task_self_port() -> libc::mach_port_t {
+    // SAFETY: libsystem sets this global during process start, before `main`, and never changes it.
     unsafe { mach_task_self_ }
 }
 
 fn deallocate_port(port: SubscriptionHandle) {
     #[cfg(target_os = "macos")]
     if port != MACH_PORT_NULL {
+        // SAFETY: All arguments are port names, not pointers. A stale name makes the kernel return
+        // an error code, which is ignored.
         unsafe {
             let _ = mach_port_deallocate(mach_task_self_port(), port);
         }
