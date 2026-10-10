@@ -13,6 +13,7 @@ use crate::cli::{Cli, Command, RiftCommand, RunArgs};
 use crate::daemon::{Daemon, STARTUP_READY_LINE};
 use crate::error::BarrsError;
 use crate::ipc::{EventPayload, Request, Response, default_socket_path, send_request};
+use crate::lua_executor::LuaExecutor;
 use crate::render::create_renderer;
 use crate::{config, rift};
 
@@ -32,7 +33,7 @@ pub async fn run(cli: Cli) -> Result<(), BarrsError> {
             let config_path = resolve_config_path(args.config);
             ensure_config_exists(&config_path)?;
             if cfg!(debug_assertions) {
-                let (config, lua) = config::load_config_with_runtime(&config_path)?;
+                let (lua, config) = LuaExecutor::start(&config_path)?;
                 let daemon = Daemon::new_loaded(
                     config_path,
                     apply_socket_override(config, args.socket),
@@ -54,7 +55,7 @@ pub async fn run(cli: Cli) -> Result<(), BarrsError> {
         Command::Run(args) => {
             let config_path = resolve_config_path(args.config);
             ensure_config_exists(&config_path)?;
-            let (config, lua) = config::load_config_with_runtime(&config_path)?;
+            let (lua, config) = LuaExecutor::start(&config_path)?;
             let daemon = Daemon::new_loaded(
                 config_path,
                 apply_socket_override(config, args.socket),

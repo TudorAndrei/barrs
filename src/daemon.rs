@@ -6,17 +6,17 @@ use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use mlua::{Lua, LuaSerdeExt};
 use serde_json::json;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::{self, Duration, Instant};
 
-use crate::config::{Config, ItemConfig, PluginKind, load_config_with_runtime};
+use crate::config::{Config, ItemConfig, PluginKind};
 use crate::error::BarrsError;
 use crate::ipc::{
     EventPayload, Request, Response, read_request_frame, send_request, write_response,
 };
+use crate::lua_executor::LuaExecutor;
 use crate::plugin::from_item_config;
 use crate::render::{RenderItemSnapshot, Renderer};
 use crate::rift::{
@@ -81,7 +81,7 @@ struct IncomingRequest {
 struct DaemonState<R: Renderer> {
     config: Config,
     config_epoch: u64,
-    lua: Lua,
+    lua: LuaExecutor,
     backend: RiftBackendKind,
     rift_subscription: Option<RiftSubscription>,
     rift_snapshot: Option<RiftSnapshot>,
@@ -94,7 +94,7 @@ struct DaemonState<R: Renderer> {
 }
 
 impl<R: Renderer> Daemon<R> {
-    /// Creates a daemon from an already loaded config and Lua runtime.
+    /// Creates a daemon from a config and the Lua executor that loaded it.
     ///
     /// # Errors
     ///
@@ -102,7 +102,7 @@ impl<R: Renderer> Daemon<R> {
     pub fn new_loaded(
         config_path: PathBuf,
         config: Config,
-        lua: Lua,
+        lua: LuaExecutor,
         renderer: R,
     ) -> Result<Self, BarrsError> {
         let backend = select_backend();
@@ -131,7 +131,7 @@ impl<R: Renderer> Daemon<R> {
 
     #[cfg(test)]
     fn new(config_path: PathBuf, config: Config, renderer: R) -> Result<Self, BarrsError> {
-        let (_, lua) = load_config_with_runtime(&config_path)?;
+        let (lua, _) = LuaExecutor::start(&config_path)?;
         Self::new_loaded(config_path, config, lua, renderer)
     }
 
@@ -265,7 +265,7 @@ impl<R: Renderer> Daemon<R> {
     }
 
     async fn reload(&self) -> Result<(), BarrsError> {
-        let (config, lua) = load_config_with_runtime(&self.config_path)?;
+        let (lua, config) = LuaExecutor::start(&self.config_path)?;
         let backend = select_backend();
         let backend_kind = backend.kind();
         let rift_snapshot = backend.snapshot().ok();
@@ -535,10 +535,11 @@ impl<R: Renderer> Daemon<R> {
             .position(|candidate| candidate.id == item.id)
             .unwrap_or(0);
 
-        {
+        let lua = {
             let state = self.state.lock().await;
-            invoke_lua_handler(&state.lua, &item, &payload)?;
-        }
+            state.lua.clone()
+        };
+        invoke_lua_handler(&lua, &item, &payload).await?;
 
         {
             let mut state = self.state.lock().await;
@@ -797,8 +798,8 @@ fn snapshot_for_item(
     ))
 }
 
-fn invoke_lua_handler(
-    lua: &Lua,
+async fn invoke_lua_handler(
+    lua: &LuaExecutor,
     item: &ItemConfig,
     payload: &EventPayload,
 ) -> Result<(), BarrsError> {
@@ -813,48 +814,8 @@ fn invoke_lua_handler(
     let Some(handler_name) = handler_name else {
         return Ok(());
     };
-
-    let globals = lua.globals();
-    let func: mlua::Function = globals
-        .get(handler_name.as_str())
-        .map_err(|_| BarrsError::InvalidConfig(format!("missing handler {handler_name}")))?;
-    let ctx = lua.to_value(payload)?;
-    call_lua_with_timeout(lua, &func, ctx, LUA_HANDLER_TIMEOUT)
-}
-
-/// Longest time one Lua event handler may run before barrs stops it.
-const LUA_HANDLER_TIMEOUT: Duration = Duration::from_secs(1);
-/// Number of Lua VM instructions between two deadline checks.
-const LUA_DEADLINE_CHECK_INTERVAL: u32 = 10_000;
-
-/// Calls `func` and stops it with an error if it runs longer than `timeout`.
-///
-/// The hook counts VM instructions, so it cannot stop a handler that is blocked
-/// inside one C call such as `os.execute`.
-fn call_lua_with_timeout(
-    lua: &Lua,
-    func: &mlua::Function,
-    ctx: mlua::Value,
-    timeout: Duration,
-) -> Result<(), BarrsError> {
-    if let Some(deadline) = std::time::Instant::now().checked_add(timeout) {
-        lua.set_global_hook(
-            mlua::HookTriggers::new().every_nth_instruction(LUA_DEADLINE_CHECK_INTERVAL),
-            move |_, _| {
-                if std::time::Instant::now() >= deadline {
-                    Err(mlua::Error::runtime(format!(
-                        "handler exceeded the {} ms time limit",
-                        timeout.as_millis()
-                    )))
-                } else {
-                    Ok(mlua::VmState::Continue)
-                }
-            },
-        )?;
-    }
-    let result = func.call::<()>(ctx);
-    lua.remove_global_hook();
-    result.map_err(BarrsError::from)
+    lua.call_handler(handler_name, serde_json::to_value(payload)?)
+        .await
 }
 
 #[cfg(test)]
@@ -1399,34 +1360,6 @@ return {{
         task.await.expect("join").expect("daemon result");
     }
 
-    #[test]
-    fn lua_handler_that_never_returns_is_stopped() {
-        let lua = mlua::Lua::new();
-        lua.load("function spin() while true do end end\nfunction ok() return 1 end")
-            .exec()
-            .expect("load handlers");
-        let spin: mlua::Function = lua.globals().get("spin").expect("spin");
-        let started = std::time::Instant::now();
-        let error = super::call_lua_with_timeout(
-            &lua,
-            &spin,
-            mlua::Value::Nil,
-            std::time::Duration::from_millis(50),
-        )
-        .expect_err("spin must time out");
-        assert!(error.to_string().contains("time limit"), "{error}");
-        assert!(started.elapsed() < std::time::Duration::from_secs(5));
-
-        let ok: mlua::Function = lua.globals().get("ok").expect("ok");
-        super::call_lua_with_timeout(
-            &lua,
-            &ok,
-            mlua::Value::Nil,
-            std::time::Duration::from_millis(50),
-        )
-        .expect("handler runs after a timeout");
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn lua_handler_state_persists_between_events() {
         let dir = tempdir().expect("tempdir");
@@ -1556,7 +1489,7 @@ return {{
         let handler_path = dir.path().join("handler.txt");
         write_evaluation_config(&config_path, &socket_path, &evaluation_path, &handler_path);
 
-        let (config, lua) = crate::config::load_config_with_runtime(&config_path).expect("load");
+        let (lua, config) = crate::lua_executor::LuaExecutor::start(&config_path).expect("load");
         let daemon =
             Daemon::new_loaded(config_path.clone(), config, lua, NoopRenderer).expect("daemon");
         assert_eq!(

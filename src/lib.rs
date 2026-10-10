@@ -4,6 +4,7 @@ pub mod config;
 pub mod daemon;
 pub mod error;
 pub mod ipc;
+pub mod lua_executor;
 pub mod plugin;
 mod process;
 pub mod render;
