@@ -1769,7 +1769,7 @@ fn create_native_host() -> Box<dyn NativeHost> {
 pub fn create_renderer(kind: RendererKind) -> Result<Box<dyn Renderer>, BarrsError> {
     match kind {
         RendererKind::Native => Ok(Box::new(NativeRenderer::new(create_native_host()))),
-        RendererKind::Noop => Ok(Box::new(NoopRenderer::default())),
+        RendererKind::Noop => Ok(Box::new(NoopRenderer)),
     }
 }
 
@@ -1788,6 +1788,7 @@ impl NativeRenderer {
         }
     }
 
+    #[cfg(test)]
     #[must_use]
     pub const fn surface_state(&self) -> &NativeSurfaceState {
         &self.state
@@ -1896,45 +1897,22 @@ impl Renderer for NativeRenderer {
 }
 
 #[derive(Default)]
-pub struct NoopRenderer {
-    rendered_items: usize,
-    snapshots: HashMap<String, RenderItemSnapshot>,
-}
-
-impl NoopRenderer {
-    #[must_use]
-    pub const fn rendered_items(&self) -> usize {
-        self.rendered_items
-    }
-
-    #[must_use]
-    pub fn snapshot(&self, item_id: &str) -> Option<&RenderItemSnapshot> {
-        self.snapshots.get(item_id)
-    }
-}
+pub struct NoopRenderer;
 
 impl Renderer for NoopRenderer {
     fn initialize(&mut self, _config: &Config) -> Result<(), BarrsError> {
         Ok(())
     }
 
-    fn render_item(&mut self, snapshot: &RenderItemSnapshot) -> Result<(), BarrsError> {
-        self.rendered_items = self.rendered_items.saturating_add(1);
-        self.snapshots.insert(snapshot.id.clone(), snapshot.clone());
+    fn render_item(&mut self, _snapshot: &RenderItemSnapshot) -> Result<(), BarrsError> {
         Ok(())
     }
 
     fn reconcile(
         &mut self,
         _config: &Config,
-        snapshots: &[RenderItemSnapshot],
+        _snapshots: &[RenderItemSnapshot],
     ) -> Result<(), BarrsError> {
-        self.rendered_items = self.rendered_items.saturating_add(snapshots.len());
-        self.snapshots = snapshots
-            .iter()
-            .cloned()
-            .map(|snapshot| (snapshot.id.clone(), snapshot))
-            .collect();
         Ok(())
     }
 }
@@ -2270,8 +2248,8 @@ mod tests {
 
     use super::{
         HostCommand, HostRuntimeState, HoverSurface, InteractiveSnapshot, LayerMutation,
-        MockNativeHost, NativeHost, NativeRenderer, NoopRenderer, RenderItemSnapshot, Renderer,
-        RendererKind, create_renderer, diff_host_scene, host_scene_plan, parse_hex_color,
+        MockNativeHost, NativeHost, NativeRenderer, RenderItemSnapshot, Renderer, RendererKind,
+        create_renderer, diff_host_scene, host_scene_plan, parse_hex_color,
     };
 
     fn test_snapshot(
@@ -2366,31 +2344,6 @@ mod tests {
         assert_eq!(snapshot.text, "13%");
         assert!(snapshot.interactive.click);
         assert!(snapshot.interactive.hover);
-    }
-
-    #[test]
-    fn noop_renderer_stores_snapshots() {
-        let mut renderer = NoopRenderer::default();
-        let item = RenderItemSnapshot {
-            id: "clock".into(),
-            order: 0,
-            label: Some("clock".into()),
-            icon: None,
-            placement: None,
-            text: "12:34".into(),
-            hover: None,
-            interactive: InteractiveSnapshot {
-                click: false,
-                right_click: false,
-                scroll: false,
-                hover: false,
-            },
-            data: json!({ "text": "12:34" }),
-        };
-
-        renderer.render_item(&item).expect("render item");
-        assert_eq!(renderer.rendered_items(), 1);
-        assert_eq!(renderer.snapshot("clock").expect("snapshot").text, "12:34");
     }
 
     #[test]

@@ -1144,8 +1144,7 @@ return {{
         write_config(&config_path, &socket_path);
 
         let config = load_config(&config_path).expect("config");
-        let daemon =
-            Daemon::new(config_path.clone(), config, NoopRenderer::default()).expect("daemon");
+        let daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
         let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
 
         for _ in 0..20 {
@@ -1176,8 +1175,7 @@ return {{
         write_trigger_config(&config_path, &socket_path, &marker_path);
 
         let config = load_config(&config_path).expect("config");
-        let daemon =
-            Daemon::new(config_path.clone(), config, NoopRenderer::default()).expect("daemon");
+        let daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
         let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
 
         wait_for_socket(&socket_path).await;
@@ -1213,8 +1211,7 @@ return {{
         write_config(&config_path, &socket_path);
 
         let config = load_config(&config_path).expect("config");
-        let daemon =
-            Daemon::new(config_path.clone(), config, NoopRenderer::default()).expect("daemon");
+        let daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
         let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
 
         wait_for_socket(&socket_path).await;
@@ -1252,8 +1249,7 @@ return {{
         write_trigger_config(&config_path, &socket_path, &marker_path);
 
         let config = load_config(&config_path).expect("config");
-        let daemon =
-            Daemon::new(config_path.clone(), config, NoopRenderer::default()).expect("daemon");
+        let daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
         let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
 
         wait_for_socket(&socket_path).await;
@@ -1293,8 +1289,7 @@ return {{
         write_config(&config_path, &socket_path);
 
         let config = load_config(&config_path).expect("config");
-        let daemon =
-            Daemon::new(config_path.clone(), config, NoopRenderer::default()).expect("daemon");
+        let daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
         let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
 
         wait_for_socket(&socket_path).await;
@@ -1378,8 +1373,7 @@ return {{
         write_counter_config(&config_path, &socket_path, &marker_path);
 
         let config = load_config(&config_path).expect("config");
-        let daemon =
-            Daemon::new(config_path.clone(), config, NoopRenderer::default()).expect("daemon");
+        let daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
         let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
 
         wait_for_socket(&socket_path).await;
@@ -1414,8 +1408,7 @@ return {{
         write_counter_config(&config_path, &socket_path, &marker_path);
 
         let config = load_config(&config_path).expect("config");
-        let daemon =
-            Daemon::new(config_path.clone(), config, NoopRenderer::default()).expect("daemon");
+        let daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
         let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
 
         wait_for_socket(&socket_path).await;
@@ -1449,8 +1442,7 @@ return {{
         write_counter_config(&config_path, &socket_path, &marker_path);
 
         let config = load_config(&config_path).expect("config");
-        let daemon =
-            Daemon::new(config_path.clone(), config, NoopRenderer::default()).expect("daemon");
+        let daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
         let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
 
         wait_for_socket(&socket_path).await;
@@ -1502,8 +1494,8 @@ return {{
         write_evaluation_config(&config_path, &socket_path, &evaluation_path, &handler_path);
 
         let (config, lua) = crate::config::load_config_with_runtime(&config_path).expect("load");
-        let daemon = Daemon::new_loaded(config_path.clone(), config, lua, NoopRenderer::default())
-            .expect("daemon");
+        let daemon =
+            Daemon::new_loaded(config_path.clone(), config, lua, NoopRenderer).expect("daemon");
         assert_eq!(
             fs::read_to_string(&evaluation_path).expect("evaluation"),
             "1"
@@ -1549,8 +1541,7 @@ return {{
         write_config(&config_path, &socket_path);
         let config = load_config(&config_path).expect("config");
         assert!(!super::has_rift_items(&config));
-        let daemon =
-            Daemon::new(config_path.clone(), config, NoopRenderer::default()).expect("daemon");
+        let daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
         {
             let mut state = daemon.state.lock().await;
             state.rift_dirty = true;
@@ -1575,8 +1566,7 @@ return {{
         write_rift_config(&config_path, &socket_path);
         let config = load_config(&config_path).expect("config");
         assert!(super::has_rift_items(&config));
-        let daemon =
-            Daemon::new(config_path.clone(), config, NoopRenderer::default()).expect("daemon");
+        let daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
         let initial = test_rift_snapshot("one");
         {
             let mut state = daemon.state.lock().await;
@@ -1702,8 +1692,7 @@ return {{
         write_trigger_config(&config_path, &socket_path, &marker_path);
 
         let config = load_config(&config_path).expect("config");
-        let daemon =
-            Daemon::new(config_path.clone(), config, NoopRenderer::default()).expect("daemon");
+        let daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
 
         let error = daemon
             .dispatch_event(crate::ipc::EventPayload::from_trigger(
@@ -1764,8 +1753,7 @@ return {{
         write_config(&config_path, &socket_path);
 
         let config = load_config(&config_path).expect("config");
-        let first = Daemon::new(config_path.clone(), config, NoopRenderer::default())
-            .expect("first daemon");
+        let first = Daemon::new(config_path.clone(), config, NoopRenderer).expect("first daemon");
         let first_task: JoinHandle<Result<(), crate::error::BarrsError>> =
             tokio::spawn(first.run());
         wait_for_socket(&socket_path).await;
