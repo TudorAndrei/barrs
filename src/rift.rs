@@ -830,7 +830,10 @@ fn allocate_reply_port() -> Result<libc::mach_port_t, BarrsError> {
 }
 
 #[cfg(target_os = "macos")]
-#[allow(deprecated)]
+#[expect(
+    deprecated,
+    reason = "libc deprecates mach_task_self in favor of the mach2 crate"
+)]
 fn mach_task_self_port() -> libc::mach_port_t {
     unsafe { libc::mach_task_self() }
 }
