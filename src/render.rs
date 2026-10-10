@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use usage::ValueEnum;
+use usage_rs::ValueEnum;
 
 use crate::config::{BarSection, Config, HoverConfig, ItemConfig};
 use crate::error::BarrsError;

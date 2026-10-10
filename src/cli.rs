@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use usage::{Args, Cli as UsageCli, Subcommands, ValueEnum};
+use usage_rs::{Args, Cli as UsageCli, Subcommands, ValueEnum};
 
 use crate::render::RendererKind;
 

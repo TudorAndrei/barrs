@@ -10,7 +10,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
 tokio = { version = "1.44", features = ["macros", "net", "rt", "sync", "io-util", "time"] }
-usage = { package = "usage-rs", version = "6.11" }
+usage-rs = "7"
 
 [dev-dependencies]
 tempfile = "3.13"
