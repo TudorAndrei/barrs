@@ -818,8 +818,42 @@ fn invoke_lua_handler(
         .get(handler_name.as_str())
         .map_err(|_| BarrsError::InvalidConfig(format!("missing handler {handler_name}")))?;
     let ctx = lua.to_value(payload)?;
-    func.call::<()>(ctx)?;
-    Ok(())
+    call_lua_with_timeout(lua, &func, ctx, LUA_HANDLER_TIMEOUT)
+}
+
+/// Longest time one Lua event handler may run before barrs stops it.
+const LUA_HANDLER_TIMEOUT: Duration = Duration::from_secs(1);
+/// Number of Lua VM instructions between two deadline checks.
+const LUA_DEADLINE_CHECK_INTERVAL: u32 = 10_000;
+
+/// Calls `func` and stops it with an error if it runs longer than `timeout`.
+///
+/// The hook counts VM instructions, so it cannot stop a handler that is blocked
+/// inside one C call such as `os.execute`.
+fn call_lua_with_timeout(
+    lua: &Lua,
+    func: &mlua::Function,
+    ctx: mlua::Value,
+    timeout: Duration,
+) -> Result<(), BarrsError> {
+    if let Some(deadline) = std::time::Instant::now().checked_add(timeout) {
+        lua.set_global_hook(
+            mlua::HookTriggers::new().every_nth_instruction(LUA_DEADLINE_CHECK_INTERVAL),
+            move |_, _| {
+                if std::time::Instant::now() >= deadline {
+                    Err(mlua::Error::runtime(format!(
+                        "handler exceeded the {} ms time limit",
+                        timeout.as_millis()
+                    )))
+                } else {
+                    Ok(mlua::VmState::Continue)
+                }
+            },
+        )?;
+    }
+    let result = func.call::<()>(ctx);
+    lua.remove_global_hook();
+    result.map_err(BarrsError::from)
 }
 
 #[cfg(test)]
@@ -1362,6 +1396,34 @@ return {{
             .await
             .expect("stop");
         task.await.expect("join").expect("daemon result");
+    }
+
+    #[test]
+    fn lua_handler_that_never_returns_is_stopped() {
+        let lua = mlua::Lua::new();
+        lua.load("function spin() while true do end end\nfunction ok() return 1 end")
+            .exec()
+            .expect("load handlers");
+        let spin: mlua::Function = lua.globals().get("spin").expect("spin");
+        let started = std::time::Instant::now();
+        let error = super::call_lua_with_timeout(
+            &lua,
+            &spin,
+            mlua::Value::Nil,
+            std::time::Duration::from_millis(50),
+        )
+        .expect_err("spin must time out");
+        assert!(error.to_string().contains("time limit"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+
+        let ok: mlua::Function = lua.globals().get("ok").expect("ok");
+        super::call_lua_with_timeout(
+            &lua,
+            &ok,
+            mlua::Value::Nil,
+            std::time::Duration::from_millis(50),
+        )
+        .expect("handler runs after a timeout");
     }
 
     #[tokio::test(flavor = "current_thread")]
