@@ -189,13 +189,13 @@ impl<R: Renderer> Daemon<R> {
                     let Some(incoming) = incoming else {
                         continue;
                     };
+                    let stop = matches!(incoming.request, Request::Stop);
                     let response = match self.handle_request(incoming.request).await {
                         Ok(response) => response,
                         Err(error) => Response::Error {
                             message: error.to_string(),
                         },
                     };
-                    let stop = matches!(response, Response::Ok { ref message } if message == "stopping");
                     let _ = incoming.response.send(response);
                     if stop {
                         break;
@@ -623,9 +623,12 @@ async fn reclaim_stale_socket(path: &Path) -> Result<(), BarrsError> {
     Ok(())
 }
 
+/// Line the daemon prints on stdout once its socket accepts requests.
+pub const STARTUP_READY_LINE: &str = "barrs-ready";
+
 fn signal_startup_ready() {
     if env::var_os("BARRS_STARTUP_READY").is_some() {
-        let _ = std::io::stdout().write_all(b"barrs-ready\n");
+        let _ = writeln!(std::io::stdout(), "{STARTUP_READY_LINE}");
         let _ = std::io::stdout().flush();
     }
 }

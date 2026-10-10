@@ -10,7 +10,7 @@ use std::time::Duration;
 use std::os::unix::process::CommandExt;
 
 use crate::cli::{Cli, Command, RiftCommand, RunArgs};
-use crate::daemon::Daemon;
+use crate::daemon::{Daemon, STARTUP_READY_LINE};
 use crate::error::BarrsError;
 use crate::ipc::{EventPayload, Request, Response, default_socket_path, send_request};
 use crate::render::create_renderer;
@@ -195,7 +195,7 @@ fn spawn_background_process(args: RunArgs) -> Result<(), BarrsError> {
     });
 
     match ready_receiver.recv_timeout(Duration::from_secs(5)) {
-        Ok(Ok(line)) if line == "barrs-ready" => Ok(()),
+        Ok(Ok(line)) if line == STARTUP_READY_LINE => Ok(()),
         Ok(Ok(line)) => Err(startup_failure(
             &mut child,
             &mut stderr,
