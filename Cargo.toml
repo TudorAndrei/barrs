@@ -32,6 +32,9 @@ panic = "deny"
 exit = "deny"
 as_conversions = "deny"
 
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
 [profile.release]
 codegen-units = 1
 lto = true
