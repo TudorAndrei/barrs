@@ -24,7 +24,7 @@ jobs:
       - name: Set up shared build cache
         uses: jdx/mr-boxington-action@v1
         with:
-          version: "1.19.0"
+          version: "1.23.0"
           toolchain: "1.97.1"
 
       - name: Check formatting
