@@ -830,12 +830,8 @@ fn allocate_reply_port() -> Result<libc::mach_port_t, BarrsError> {
 }
 
 #[cfg(target_os = "macos")]
-#[expect(
-    deprecated,
-    reason = "libc deprecates mach_task_self in favor of the mach2 crate"
-)]
 fn mach_task_self_port() -> libc::mach_port_t {
-    unsafe { libc::mach_task_self() }
+    unsafe { mach_task_self_ }
 }
 
 fn deallocate_port(port: SubscriptionHandle) {
@@ -874,6 +870,8 @@ const fn mach_msg_bits(remote: u32, local: u32) -> u32 {
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     static bootstrap_port: libc::mach_port_t;
+    // The C `mach_task_self()` macro reads this global; libsystem sets it before `main`.
+    static mach_task_self_: libc::mach_port_t;
 
     fn bootstrap_look_up(
         bp: libc::mach_port_t,
