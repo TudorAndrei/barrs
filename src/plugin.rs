@@ -59,6 +59,8 @@ pub fn from_item_config(item: &ItemConfig, rift: Option<&RiftSnapshot>) -> Optio
         PluginKind::RiftLayout => Some(Box::new(RiftLayoutPlugin {
             snapshot: rift.cloned(),
         })),
+        // The daemon runs Lua update functions on the Lua executor, not as a Rust plugin.
+        PluginKind::Lua => None,
     }
 }
 
@@ -327,6 +329,7 @@ mod tests {
             plugin: Some(PluginBinding {
                 kind: PluginKind::Cpu,
                 format: None,
+                update: None,
             }),
             hover: None,
             handlers: ItemHandlers::default(),
@@ -374,6 +377,7 @@ mod tests {
             plugin: Some(PluginBinding {
                 kind: PluginKind::RiftWorkspaces,
                 format: None,
+                update: None,
             }),
             hover: None,
             handlers: ItemHandlers::default(),
@@ -454,6 +458,7 @@ mod tests {
             plugin: Some(PluginBinding {
                 kind: PluginKind::Time,
                 format: None,
+                update: None,
             }),
             hover: None,
             handlers: ItemHandlers::default(),
@@ -477,6 +482,7 @@ mod tests {
             plugin: Some(PluginBinding {
                 kind: PluginKind::Date,
                 format: None,
+                update: None,
             }),
             hover: None,
             handlers: ItemHandlers::default(),

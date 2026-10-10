@@ -722,6 +722,7 @@ fn item_refresh_interval(item: &ItemConfig, backend: RiftBackendKind) -> Option<
             Some(PluginKind::Date) => Some(Duration::from_mins(30)),
             Some(PluginKind::Cpu | PluginKind::Gpu) => Some(Duration::from_secs(2)),
             Some(PluginKind::Battery) => Some(Duration::from_secs(10)),
+            Some(PluginKind::Lua) => Some(Duration::from_secs(5)),
             Some(PluginKind::RiftWorkspaces | PluginKind::RiftLayout) => {
                 if backend == RiftBackendKind::Cli {
                     Some(Duration::from_millis(250))
@@ -2063,6 +2064,7 @@ return {{
             plugin: Some(crate::config::PluginBinding {
                 kind: crate::config::PluginKind::RiftWorkspaces,
                 format: None,
+                update: None,
             }),
             hover: None,
             handlers: crate::config::ItemHandlers::default(),
@@ -2086,7 +2088,11 @@ return {{
             icon: None,
             placement: None,
             interval: None,
-            plugin: Some(crate::config::PluginBinding { kind, format: None }),
+            plugin: Some(crate::config::PluginBinding {
+                kind,
+                format: None,
+                update: None,
+            }),
             hover: None,
             handlers: crate::config::ItemHandlers::default(),
         };
@@ -2136,7 +2142,11 @@ return {{
             icon: None,
             placement: None,
             interval: None,
-            plugin: Some(PluginBinding { kind, format: None }),
+            plugin: Some(PluginBinding {
+                kind,
+                format: None,
+                update: None,
+            }),
             hover: None,
             handlers: ItemHandlers::default(),
         };
@@ -2156,7 +2166,11 @@ return {{
             icon: None,
             placement: None,
             interval: None,
-            plugin: Some(PluginBinding { kind, format: None }),
+            plugin: Some(PluginBinding {
+                kind,
+                format: None,
+                update: None,
+            }),
             hover: None,
             handlers: ItemHandlers::default(),
         };
@@ -2181,7 +2195,11 @@ return {{
             icon: None,
             placement: None,
             interval: None,
-            plugin: Some(PluginBinding { kind, format: None }),
+            plugin: Some(PluginBinding {
+                kind,
+                format: None,
+                update: None,
+            }),
             hover: None,
             handlers: ItemHandlers::default(),
         }
@@ -2198,6 +2216,7 @@ return {{
             plugin: Some(crate::config::PluginBinding {
                 kind: crate::config::PluginKind::Date,
                 format: None,
+                update: None,
             }),
             hover: None,
             handlers: crate::config::ItemHandlers::default(),

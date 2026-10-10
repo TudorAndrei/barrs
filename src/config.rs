@@ -125,6 +125,9 @@ pub struct PluginBinding {
     pub kind: PluginKind,
     #[serde(default)]
     pub format: Option<String>,
+    /// Global Lua function that a `lua` plugin calls to produce the item text.
+    #[serde(default)]
+    pub update: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -137,6 +140,7 @@ pub enum PluginKind {
     Gpu,
     RiftWorkspaces,
     RiftLayout,
+    Lua,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,6 +235,27 @@ pub fn validate_config(config: &Config) -> Result<(), BarrsError> {
         let Some(plugin) = &item.plugin else {
             continue;
         };
+        match (plugin.kind, plugin.update.as_deref()) {
+            (PluginKind::Lua, None) => {
+                return Err(BarrsError::InvalidConfig(format!(
+                    "lua plugin for item {} must set update to a global function name",
+                    item.id
+                )));
+            }
+            (PluginKind::Lua, Some(update)) if update.trim().is_empty() => {
+                return Err(BarrsError::InvalidConfig(format!(
+                    "lua plugin for item {} must not have an empty update",
+                    item.id
+                )));
+            }
+            (kind, Some(_)) if kind != PluginKind::Lua => {
+                return Err(BarrsError::InvalidConfig(format!(
+                    "item {} sets update, which only lua plugins accept",
+                    item.id
+                )));
+            }
+            _ => {}
+        }
         if plugin.kind == PluginKind::Date
             && plugin
                 .format
@@ -253,6 +278,15 @@ fn validate_handlers(lua: &Lua, config: &Config) -> Result<(), BarrsError> {
             globals
                 .get::<Function>(handler.as_str())
                 .map_err(|_| BarrsError::InvalidConfig(format!("missing handler {handler}")))?;
+        }
+        if let Some(update) = item
+            .plugin
+            .as_ref()
+            .and_then(|plugin| plugin.update.as_ref())
+        {
+            globals.get::<Function>(update.as_str()).map_err(|_| {
+                BarrsError::InvalidConfig(format!("missing update function {update}"))
+            })?;
         }
     }
     Ok(())
@@ -410,6 +444,63 @@ return {
             Some(BarSection::Right)
         );
         assert_eq!(BarSection::from_placement(Some("floating")), None);
+    }
+
+    #[test]
+    fn loads_lua_plugin_with_update_function() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("barrs.lua");
+        fs::write(
+            &path,
+            r#"
+function memory_usage(ctx) return "42%" end
+return {
+  items = {
+    { id = "memory", plugin = { kind = "lua", update = "memory_usage" } },
+  }
+}
+"#,
+        )
+        .expect("write config");
+
+        let config = load_config(&path).expect("lua plugin should load");
+        let plugin = config.items[0].plugin.as_ref().expect("plugin");
+        assert_eq!(plugin.kind, PluginKind::Lua);
+        assert_eq!(plugin.update.as_deref(), Some("memory_usage"));
+    }
+
+    #[test]
+    fn rejects_invalid_lua_plugin_bindings() {
+        let cases = [
+            (r#"{ kind = "lua" }"#, "must set update"),
+            (
+                r#"{ kind = "lua", update = " " }"#,
+                "must not have an empty update",
+            ),
+            (
+                r#"{ kind = "cpu", update = "memory_usage" }"#,
+                "only lua plugins accept",
+            ),
+            (
+                r#"{ kind = "lua", update = "missing" }"#,
+                "missing update function missing",
+            ),
+        ];
+        for (binding, expected) in cases {
+            let dir = tempdir().expect("tempdir");
+            let path = dir.path().join("barrs.lua");
+            fs::write(
+                &path,
+                format!(
+                    "function memory_usage(ctx) return \"42%\" end\n\
+                     return {{ items = {{ {{ id = \"memory\", plugin = {binding} }} }} }}\n"
+                ),
+            )
+            .expect("write config");
+
+            let error = load_config(&path).expect_err(binding);
+            assert!(error.to_string().contains(expected), "{binding}: {error}");
+        }
     }
 
     #[test]
