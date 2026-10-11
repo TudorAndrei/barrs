@@ -28,6 +28,8 @@ const EVENT_TICK_MS: u64 = 16;
 const POLL_TICK_MS: u64 = 250;
 const RIFT_DEBOUNCE_MS: u64 = 16;
 const PENDING_IPC_REQUESTS: usize = 64;
+/// Longest time the daemon waits at stop for connection tasks to send replies.
+const CONNECTION_DRAIN_MS: u64 = 250;
 
 pub struct Daemon<R: Renderer> {
     config_path: PathBuf,
@@ -163,6 +165,7 @@ impl<R: Renderer> Daemon<R> {
         let (request_sender, mut request_receiver) = mpsc::channel(PENDING_IPC_REQUESTS);
         let mut event_tick = time::interval(Duration::from_millis(EVENT_TICK_MS));
         let mut poll_tick = time::interval(Duration::from_millis(POLL_TICK_MS));
+        let mut connections = tokio::task::JoinSet::new();
 
         loop {
             tokio::select! {
@@ -182,6 +185,7 @@ impl<R: Renderer> Daemon<R> {
                         Err(error) => eprintln!("barrs: refresh task failed: {error}"),
                     }
                 }
+                Some(_) = connections.join_next(), if !connections.is_empty() => {}
                 Some(update) = self.update_receiver.recv() => {
                     if let Err(error) = self.apply_update(update).await {
                         eprintln!("barrs: applying lua update failed: {error}");
@@ -191,9 +195,7 @@ impl<R: Renderer> Daemon<R> {
                     match accept_result {
                         Ok((stream, _)) => {
                             let sender = request_sender.clone();
-                            tokio::spawn(async move {
-                                serve_connection(stream, sender).await;
-                            });
+                            connections.spawn(serve_connection(stream, sender));
                         }
                         Err(error) => eprintln!("barrs: accept failed: {error}"),
                     }
@@ -233,6 +235,13 @@ impl<R: Renderer> Daemon<R> {
         if let Some(pending) = self.pending_refresh.take() {
             pending.abort();
         }
+        // The runtime can end when `run` returns, so let connection tasks send
+        // their replies first. Closing the queue answers requests not yet handled.
+        drop(request_receiver);
+        let _ = time::timeout(Duration::from_millis(CONNECTION_DRAIN_MS), async {
+            while connections.join_next().await.is_some() {}
+        })
+        .await;
         cleanup_socket(&socket_path)?;
         Ok(())
     }
@@ -1479,6 +1488,32 @@ return {{
             .await
             .expect("stop");
         task.await.expect("join").expect("daemon result");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stop_reply_arrives_before_the_daemon_runtime_shuts_down() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("barrs.sock");
+        let config_path = dir.path().join("barrs.lua");
+        write_config(&config_path, &socket_path);
+
+        // Like the binary, the daemon runtime ends as soon as `run` returns.
+        let daemon_thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let config = load_config(&config_path).expect("config");
+            let daemon = Daemon::new(config_path, config, NoopRenderer).expect("daemon");
+            runtime.block_on(daemon.run())
+        });
+        wait_for_socket(&socket_path).await;
+
+        let response = send_request(&socket_path, &Request::Stop)
+            .await
+            .expect("stop reply");
+        assert!(matches!(response, Response::Ok { .. }));
+        daemon_thread.join().expect("join").expect("daemon result");
     }
 
     #[tokio::test(flavor = "current_thread")]
