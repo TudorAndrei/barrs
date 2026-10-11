@@ -31,6 +31,12 @@ into renderer snapshots through `src/render.rs`. The native renderer is
 macOS/AppKit-specific and is intentionally current-thread only; the noop
 renderer supports tests and non-visual operation.
 
+The daemon directly owns its state. Its event loop processes stateful requests
+and results in order. Connection tasks parse requests, the blocking snapshot
+task reads owned inputs, and `src/lua_executor.rs` owns Lua on a separate
+thread. These tasks return values through messages. They do not share mutable
+daemon state or retained AppKit objects.
+
 ## Configuration and interaction
 
 `src/config.rs` evaluates the trusted Lua configuration once, deserializes it
