@@ -14,7 +14,8 @@ const DEFAULT_DATE_FORMAT: &str = "%Y-%m-%d";
 const TIME_FORMAT: &str = "%H:%M";
 const PLACEHOLDER_TEXT: &str = "—";
 
-fn unavailable_snapshot() -> Value {
+/// Snapshot data for an item whose data source cannot report a value.
+pub(crate) fn unavailable_snapshot() -> Value {
     json!({
         "text": PLACEHOLDER_TEXT,
         "available": false

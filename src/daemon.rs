@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{ErrorKind, Write};
@@ -16,8 +16,8 @@ use crate::error::BarrsError;
 use crate::ipc::{
     EventPayload, Request, Response, read_request_frame, send_request, write_response,
 };
-use crate::lua_executor::LuaExecutor;
-use crate::plugin::from_item_config;
+use crate::lua_executor::{LuaExecutor, UpdateResult};
+use crate::plugin::{from_item_config, unavailable_snapshot};
 use crate::render::{RenderItemSnapshot, Renderer};
 use crate::rift::{
     RiftApplyResult, RiftBackendKind, RiftSnapshot, RiftSubscription, apply_event, select_backend,
@@ -33,6 +33,8 @@ pub struct Daemon<R: Renderer> {
     config_path: PathBuf,
     state: Arc<Mutex<DaemonState<R>>>,
     pending_refresh: Option<tokio::task::JoinHandle<PendingRefresh>>,
+    update_sender: mpsc::UnboundedSender<UpdateResult>,
+    update_receiver: mpsc::UnboundedReceiver<UpdateResult>,
 }
 
 async fn serve_connection(mut stream: UnixStream, sender: mpsc::Sender<IncomingRequest>) {
@@ -91,6 +93,8 @@ struct DaemonState<R: Renderer> {
     renderer: R,
     item_states: HashMap<String, RenderItemSnapshot>,
     refresh_deadlines: HashMap<String, Instant>,
+    /// Lua items whose update function is queued or running on the executor.
+    updates_in_flight: HashSet<String>,
 }
 
 impl<R: Renderer> Daemon<R> {
@@ -121,11 +125,15 @@ impl<R: Renderer> Daemon<R> {
             last_rift_signature: None,
             renderer,
             item_states: HashMap::new(),
+            updates_in_flight: HashSet::new(),
         };
+        let (update_sender, update_receiver) = mpsc::unbounded_channel();
         Ok(Self {
             config_path,
             state: Arc::new(Mutex::new(state)),
             pending_refresh: None,
+            update_sender,
+            update_receiver,
         })
     }
 
@@ -172,6 +180,11 @@ impl<R: Renderer> Daemon<R> {
                             }
                         }
                         Err(error) => eprintln!("barrs: refresh task failed: {error}"),
+                    }
+                }
+                Some(update) = self.update_receiver.recv() => {
+                    if let Err(error) = self.apply_update(update).await {
+                        eprintln!("barrs: applying lua update failed: {error}");
                     }
                 }
                 accept_result = listener.accept() => {
@@ -277,6 +290,7 @@ impl<R: Renderer> Daemon<R> {
         state.backend = backend_kind;
         state.config = config;
         state.lua = lua;
+        state.updates_in_flight.clear();
         state.refresh_deadlines =
             build_refresh_deadlines(&state.config, Instant::now(), state.backend);
         state.rift_subscription = rift_subscription_for(&state.config);
@@ -319,9 +333,13 @@ impl<R: Renderer> Daemon<R> {
 
     async fn refresh_due_items(&mut self) -> Result<(), BarrsError> {
         let (due_items, config, epoch, cached_rift_snapshot) = {
-            let state = self.state.lock().await;
+            let mut state = self.state.lock().await;
             let now = Instant::now();
-            let due = due_item_ids(&state.refresh_deadlines, now);
+            let (lua_items, due): (Vec<String>, Vec<String>) =
+                due_item_ids(&state.refresh_deadlines, now)
+                    .into_iter()
+                    .partition(|item_id| lua_update_function(&state.config, item_id).is_some());
+            self.request_lua_updates(&mut state, &lua_items);
             (
                 due,
                 state.config.clone(),
@@ -360,6 +378,71 @@ impl<R: Renderer> Daemon<R> {
             }
         }));
 
+        Ok(())
+    }
+
+    /// Queues the update functions of due Lua items that are not already in flight.
+    ///
+    /// A due item that is still in flight keeps its deadline, so the daemon
+    /// requests it once more after the running call ends and its interval passes.
+    fn request_lua_updates(&self, state: &mut DaemonState<R>, due_items: &[String]) {
+        let requested: Vec<&String> =
+            updates_to_request(due_items, &state.updates_in_flight).collect();
+        for item_id in requested {
+            let Some(function) = lua_update_function(&state.config, item_id) else {
+                continue;
+            };
+            match state.lua.request_update(
+                state.config_epoch,
+                item_id,
+                function,
+                &self.update_sender,
+            ) {
+                Ok(()) => {
+                    state.updates_in_flight.insert(item_id.clone());
+                }
+                Err(error) => eprintln!("barrs: lua update for {item_id} failed: {error}"),
+            }
+        }
+    }
+
+    /// Renders the result of one Lua update function call.
+    ///
+    /// Results from an older config generation are discarded. A failed call
+    /// shows the unavailable placeholder.
+    async fn apply_update(&self, update: UpdateResult) -> Result<(), BarrsError> {
+        let mut state = self.state.lock().await;
+        if !refresh_epoch_matches(state.config_epoch, update.epoch) {
+            return Ok(());
+        }
+        state.updates_in_flight.remove(&update.item_id);
+        let Some((order, item)) = state
+            .config
+            .items
+            .iter()
+            .enumerate()
+            .find(|(_, item)| item.id == update.item_id)
+        else {
+            return Ok(());
+        };
+        let data = update.outcome.unwrap_or_else(|error| {
+            eprintln!("barrs: lua update for {} failed: {error}", update.item_id);
+            unavailable_snapshot()
+        });
+        let snapshot = RenderItemSnapshot::from_item_config(item, order, data);
+        let now = Instant::now();
+        let backend = state.backend;
+        let config = state.config.clone();
+        advance_refresh_deadlines(
+            &mut state.refresh_deadlines,
+            &config,
+            backend,
+            std::slice::from_ref(&update.item_id),
+            now,
+        );
+        state.renderer.render_item(&snapshot)?;
+        state.item_states.insert(update.item_id, snapshot);
+        drop(state);
         Ok(())
     }
 
@@ -552,6 +635,13 @@ impl<R: Renderer> Daemon<R> {
                 | crate::ipc::EventKind::HoverLeave
                 | crate::ipc::EventKind::HoverUpdate
         ) {
+            if is_lua_item(&item) {
+                // A handler can change the state an update function reads, so update at once.
+                let mut state = self.state.lock().await;
+                state
+                    .refresh_deadlines
+                    .insert(item.id.clone(), Instant::now());
+            }
             let rift_snapshot = if is_rift_item(&item) {
                 select_backend().snapshot().ok().or(cached_rift_snapshot)
             } else {
@@ -643,6 +733,10 @@ fn build_refresh_deadlines(
         .items
         .iter()
         .filter_map(|item| {
+            if is_lua_item(item) {
+                // Lua items show a placeholder until their first update, so run it at once.
+                return Some((item.id.clone(), now));
+            }
             item_refresh_interval(item, backend)
                 .and_then(|refresh_interval| now.checked_add(refresh_interval))
                 .map(|deadline| (item.id.clone(), deadline))
@@ -735,6 +829,31 @@ fn item_refresh_interval(item: &ItemConfig, backend: RiftBackendKind) -> Option<
         })
 }
 
+fn is_lua_item(item: &ItemConfig) -> bool {
+    item.plugin
+        .as_ref()
+        .is_some_and(|plugin| plugin.kind == PluginKind::Lua)
+}
+
+fn lua_update_function<'a>(config: &'a Config, item_id: &str) -> Option<&'a str> {
+    config
+        .items
+        .iter()
+        .find(|item| item.id == item_id)
+        .and_then(|item| item.plugin.as_ref())
+        .filter(|plugin| plugin.kind == PluginKind::Lua)
+        .and_then(|plugin| plugin.update.as_deref())
+}
+
+fn updates_to_request<'a>(
+    due_items: &'a [String],
+    in_flight: &HashSet<String>,
+) -> impl Iterator<Item = &'a String> {
+    due_items
+        .iter()
+        .filter(|item_id| !in_flight.contains(*item_id))
+}
+
 fn is_rift_item(item: &ItemConfig) -> bool {
     matches!(
         item.plugin.as_ref().map(|plugin| plugin.kind),
@@ -780,6 +899,13 @@ fn snapshot_for_item(
     order: usize,
     rift_snapshot: Option<&RiftSnapshot>,
 ) -> Result<RenderItemSnapshot, BarrsError> {
+    if is_lua_item(item) {
+        return Ok(RenderItemSnapshot::from_item_config(
+            item,
+            order,
+            unavailable_snapshot(),
+        ));
+    }
     if let Some(plugin) = from_item_config(item, rift_snapshot) {
         return Ok(RenderItemSnapshot::from_item_config(
             item,
@@ -1130,6 +1256,162 @@ return {{
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
+    }
+
+    async fn item_state(socket_path: &Path, item_id: &str) -> serde_json::Value {
+        match send_request(socket_path, &Request::DumpState)
+            .await
+            .expect("dump state")
+        {
+            Response::State(states) => states[item_id].clone(),
+            other => panic!("unexpected response {other:?}"),
+        }
+    }
+
+    async fn wait_for_item_text(
+        socket_path: &Path,
+        item_id: &str,
+        text: &str,
+    ) -> serde_json::Value {
+        for _ in 0..160 {
+            let state = item_state(socket_path, item_id).await;
+            if state["text"] == text {
+                return state;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!(
+            "item {item_id} never showed {text}: {}",
+            item_state(socket_path, item_id).await
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lua_update_functions_set_item_text() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("barrs.sock");
+        let config_path = dir.path().join("barrs.lua");
+        fs::write(
+            &config_path,
+            format!(
+                r#"
+calls = 0
+function usage(ctx)
+  calls = calls + 1
+  return {{ text = ctx.item_id .. ":" .. calls, used = 42 }}
+end
+function broken(ctx) error("boom") end
+function noop(ctx) end
+return {{
+  socket_path = "{}",
+  items = {{
+    {{ id = "memory", interval = 3600, plugin = {{ kind = "lua", update = "usage" }},
+       handlers = {{ click = "noop" }} }},
+    {{ id = "broken", interval = 3600, plugin = {{ kind = "lua", update = "broken" }} }},
+  }}
+}}
+"#,
+                socket_path.display()
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(&config_path).expect("config");
+        let daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
+        let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
+        wait_for_socket(&socket_path).await;
+
+        let memory = wait_for_item_text(&socket_path, "memory", "memory:1").await;
+        assert_eq!(memory["data"]["used"], 42);
+        let broken = wait_for_item_text(&socket_path, "broken", "—").await;
+        assert_eq!(broken["data"]["available"], false);
+
+        send_request(
+            &socket_path,
+            &Request::TriggerItem {
+                payload: crate::ipc::EventPayload::from_trigger(
+                    "memory".into(),
+                    crate::cli::TriggerEvent::Click,
+                ),
+            },
+        )
+        .await
+        .expect("trigger");
+        wait_for_item_text(&socket_path, "memory", "memory:2").await;
+
+        let _ = send_request(&socket_path, &Request::Stop)
+            .await
+            .expect("stop");
+        task.await.expect("join").expect("daemon result");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn slow_lua_update_does_not_block_ipc() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("barrs.sock");
+        let config_path = dir.path().join("barrs.lua");
+        let started_path = dir.path().join("started");
+        fs::write(
+            &config_path,
+            format!(
+                r#"
+function slow(ctx)
+  local marker = io.open("{}", "w")
+  marker:write("1")
+  marker:close()
+  local start = os.clock()
+  while os.clock() - start < 1.5 do end
+  return "done"
+end
+return {{
+  socket_path = "{}",
+  items = {{ {{ id = "slow", interval = 3600, plugin = {{ kind = "lua", update = "slow" }} }} }}
+}}
+"#,
+                started_path.display(),
+                socket_path.display()
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(&config_path).expect("config");
+        let daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
+        let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
+        wait_for_socket(&socket_path).await;
+        for _ in 0..80 {
+            if started_path.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(started_path.exists(), "update function never started");
+
+        let started = std::time::Instant::now();
+        let response = send_request(&socket_path, &Request::Ping)
+            .await
+            .expect("ping");
+        assert!(matches!(response, Response::Pong));
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "ping took {:?} while an update ran",
+            started.elapsed()
+        );
+        wait_for_item_text(&socket_path, "slow", "done").await;
+
+        let _ = send_request(&socket_path, &Request::Stop)
+            .await
+            .expect("stop");
+        task.await.expect("join").expect("daemon result");
+    }
+
+    #[test]
+    fn in_flight_lua_updates_are_not_requested_again() {
+        let due = vec!["memory".to_owned(), "disk".to_owned()];
+        let in_flight = std::collections::HashSet::from(["memory".to_owned()]);
+
+        let requested: Vec<&String> = super::updates_to_request(&due, &in_flight).collect();
+
+        assert_eq!(requested, vec!["disk"]);
     }
 
     #[tokio::test(flavor = "current_thread")]
