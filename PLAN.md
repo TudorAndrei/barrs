@@ -230,3 +230,8 @@ The isolated noop smoke test passed ping, status, snapshot data, built-in and
 Lua clicks, hover, successful reload, failed reload, stop reply, and socket
 cleanup. It used a temporary config and socket. The full criv checks and
 Markdown checks passed. No release was run.
+
+Phase 2 was committed as `5a2482a`. Both phase commits succeeded before their
+commit checkboxes were marked. The two changed Rust files have 163 fewer
+production lines and 66 more test lines than the review baseline. All tasks
+in `TODO.md` are complete.

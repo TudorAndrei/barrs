@@ -46,7 +46,7 @@ Implementation design: [PLAN.md](PLAN.md).
 - [x] Pass `criv watch --once`, `criv check`, `criv enforce --stage ci`, and
   `git diff --check`.
 - [x] Review the phase diff and update the plan if needed.
-- [ ] Commit: `refactor(plugin)!: return built-in snapshot data directly`
+- [x] Commit: `refactor(plugin)!: return built-in snapshot data directly`
 
 ## Verification
 
@@ -88,6 +88,6 @@ Implementation design: [PLAN.md](PLAN.md).
   logic into the daemon.
 - [x] Tests protect behavior rather than removed names or structures.
 - [x] `PLAN.md` and `TODO.md` reflect the implemented approach.
-- [ ] Each phase commit succeeded before its commit checkbox was marked.
-- [ ] All phase commits are scoped and use the exact drafted messages.
-- [ ] All implementation tasks are checked after their work is complete.
+- [x] Each phase commit succeeded before its commit checkbox was marked.
+- [x] All phase commits are scoped and use the exact drafted messages.
+- [x] All implementation tasks are checked after their work is complete.
