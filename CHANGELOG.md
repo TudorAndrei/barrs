@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [0.3.0](https://github.com/TudorAndrei/barrs/releases/tag/v0.3.0) - 2026-10-11
+
+### Features
+
+- (**config**) add the lua plugin kind with an update function - ([82c74a8](https://github.com/TudorAndrei/barrs/commit/82c74a87b4ae44327ef5951b618654db6652bdcd)) - TudorAndrei
+- (**daemon**) run Lua update functions on the executor - ([3de3bed](https://github.com/TudorAndrei/barrs/commit/3de3bed54c7e9341c45fb99ba2eb11ea65b7033c)) - TudorAndrei
+- (**daemon**) stop Lua event handlers that run longer than one second - ([ca32842](https://github.com/TudorAndrei/barrs/commit/ca32842512cc7198d237c28e3309e7eb0224782f)) - TudorAndrei
+
+### Bug Fixes
+
+- (**daemon**) send pending replies before the daemon exits on stop - ([88a079a](https://github.com/TudorAndrei/barrs/commit/88a079a7c16da880d1f0e41fa6dad051b3b34543)) - TudorAndrei
+
+### Documentation
+
+- (**lua**) document Lua update functions and record ADR-0020 - ([189d620](https://github.com/TudorAndrei/barrs/commit/189d620545d6a8c0b44806df5ca07d274091aefe)) - TudorAndrei
+
+### Build system
+
+- (**deps**) update mlua to v0.12 - ([fd5acf3](https://github.com/TudorAndrei/barrs/commit/fd5acf316dbeb9e93a654acd31cf653b5ccb6bf9)) - TudorAndrei
+- (**deps**) update usage-rs to v7 - ([73665ad](https://github.com/TudorAndrei/barrs/commit/73665ad9919c3dd741dd3e26f01294863bdb2851)) - TudorAndrei
+- (**lints**) deny undocumented and multi-operation unsafe blocks - ([0c0e01a](https://github.com/TudorAndrei/barrs/commit/0c0e01a64acc8b6e6ecb705a06423b5ff65b49df)) - TudorAndrei
+- (**lints**) deny unsafe_op_in_unsafe_fn - ([67c8617](https://github.com/TudorAndrei/barrs/commit/67c86179baecaa42e93c837c183ad859388e73d0)) - TudorAndrei
+- (**mbx**) update mr-boxington to 1.23.0 - ([8e506d1](https://github.com/TudorAndrei/barrs/commit/8e506d101a335dce842d052c851d869dc43e7dc0)) - TudorAndrei
+- (**mise**) add cargo-audit and an audit task - ([0f7cb11](https://github.com/TudorAndrei/barrs/commit/0f7cb11a8ac5361e10f35a029dd1611e4c1545dd)) - TudorAndrei
+
+### Refactoring
+
+- (**daemon**) detect stop from the request and share the readiness line - ([2aafe5d](https://github.com/TudorAndrei/barrs/commit/2aafe5db2898cc152930b47d6e59b503d817e434)) - TudorAndrei
+- (**lua**) own the Lua runtime on a dedicated executor thread - ([4edd5d0](https://github.com/TudorAndrei/barrs/commit/4edd5d02ea9f0cbd9ea4257de0f7d9d778c7281a)) - TudorAndrei
+- (**render**) drop unread noop renderer state and gate test-only accessors - ([810b7ed](https://github.com/TudorAndrei/barrs/commit/810b7ed7558178445be0b9efcd0fb1058ecabdb9)) - TudorAndrei
+- (**rift**) read mach_task_self_ instead of the deprecated libc wrapper - ([ef60172](https://github.com/TudorAndrei/barrs/commit/ef6017257ed39436f93cc360b3703fcea127730c)) - TudorAndrei
+- (**rift**) use expect with a reason for the deprecated mach_task_self - ([ee4b2ad](https://github.com/TudorAndrei/barrs/commit/ee4b2ad568e2d74965eec7619509bb43e7894683)) - TudorAndrei
+- (**unsafe**) document each unsafe block and keep one operation per block - ([2f35cdf](https://github.com/TudorAndrei/barrs/commit/2f35cdfe3e7f1dfdc61ec91587eabf8a5709af3a)) - TudorAndrei
+
+- - -
+
 ## [0.2.7](https://github.com/TudorAndrei/barrs/releases/tag/v0.2.7) - 2026-09-28
 
 ### Documentation
