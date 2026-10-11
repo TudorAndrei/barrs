@@ -216,3 +216,17 @@ needed. `refresh_due_items` now returns no value because it cannot fail.
 The baseline passed all 121 tests. Phase 1 passed 34 focused daemon tests and
 the complete `mise run check` with all 121 tests. The subagent review found no
 change to operation order. The criv refresh, check, and CI enforcement passed.
+
+Phase 1 was committed as `38b8b87`. Phase 2 passed 13 focused plugin tests,
+35 focused daemon tests, and the complete quality check with all 123 tests.
+The plugin subagent changed `src/plugin.rs`; a separate subagent reviewed both
+phases and reported no findings.
+
+The existing hover test now also checks click-triggered built-in refresh.
+Two new tests check the real date-format error at the plugin interface and
+its propagation through initial refresh and click dispatch.
+
+The isolated noop smoke test passed ping, status, snapshot data, built-in and
+Lua clicks, hover, successful reload, failed reload, stop reply, and socket
+cleanup. It used a temporary config and socket. The full criv checks and
+Markdown checks passed. No release was run.

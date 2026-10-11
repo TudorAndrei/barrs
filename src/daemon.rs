@@ -597,10 +597,8 @@ impl<R: Renderer> Daemon<R> {
             let rift_snapshot = fresh_rift_snapshot
                 .as_ref()
                 .or(state.rift_snapshot.as_ref());
-            if let Some(mut plugin) = from_item_config(item, rift_snapshot) {
-                plugin.handle_event(&payload)?;
-                let snapshot =
-                    RenderItemSnapshot::from_item_config(item, order, plugin.snapshot()?);
+            if let Some(data) = from_item_config(item, rift_snapshot)? {
+                let snapshot = RenderItemSnapshot::from_item_config(item, order, data);
                 state.renderer.render_item(&snapshot)?;
                 state.item_states.insert(item.id.clone(), snapshot);
             }
@@ -855,12 +853,8 @@ fn snapshot_for_item(
             unavailable_snapshot(),
         ));
     }
-    if let Some(plugin) = from_item_config(item, rift_snapshot) {
-        return Ok(RenderItemSnapshot::from_item_config(
-            item,
-            order,
-            plugin.snapshot()?,
-        ));
+    if let Some(data) = from_item_config(item, rift_snapshot)? {
+        return Ok(RenderItemSnapshot::from_item_config(item, order, data));
     }
 
     Ok(RenderItemSnapshot::from_item_config(
@@ -2159,7 +2153,7 @@ return {{
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn daemon_does_not_rerender_plugin_items_for_hover_events() {
+    async fn daemon_refreshes_builtin_items_on_click_but_not_hover() {
         let dir = tempdir().expect("tempdir");
         let socket_path = dir.path().join("barrs.sock");
         let config_path = dir.path().join("barrs.lua");
@@ -2192,6 +2186,66 @@ return {{
             .expect("hover update");
 
         assert_eq!(renders.load(Ordering::SeqCst), 1);
+
+        daemon
+            .dispatch_event(crate::ipc::EventPayload::from_trigger(
+                "clock".into(),
+                crate::cli::TriggerEvent::Click,
+            ))
+            .await
+            .expect("click refresh");
+        assert_eq!(renders.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn daemon_preserves_snapshot_errors_on_initial_refresh_and_click() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("barrs.sock");
+        let config_path = dir.path().join("barrs.lua");
+        fs::write(
+            &config_path,
+            format!(
+                r#"
+return {{
+  socket_path = "{}",
+  items = {{
+    {{ id = "date", plugin = {{ kind = "date", format = string.rep("x", 256) }} }}
+  }}
+}}
+"#,
+                socket_path.display()
+            ),
+        )
+        .expect("write config");
+        let (lua, config) = crate::lua_executor::LuaExecutor::start(&config_path).expect("load");
+        let renders = Arc::new(AtomicUsize::new(0));
+        let renderer = CountingRenderer {
+            renders: Arc::clone(&renders),
+        };
+        let mut daemon = Daemon::new_loaded(config_path, config, lua, renderer).expect("daemon");
+
+        let initial_error = daemon
+            .refresh_all_items()
+            .expect_err("format exceeds buffer");
+        assert!(matches!(
+            initial_error,
+            crate::error::BarrsError::Unsupported(message) if message == "failed to format local time"
+        ));
+        let click_error = daemon
+            .handle_request(Request::TriggerItem {
+                payload: crate::ipc::EventPayload::from_trigger(
+                    "date".into(),
+                    crate::cli::TriggerEvent::Click,
+                ),
+            })
+            .await
+            .expect_err("click must propagate the snapshot error");
+        assert!(matches!(
+            click_error,
+            crate::error::BarrsError::Unsupported(message) if message == "failed to format local time"
+        ));
+        assert_eq!(renders.load(Ordering::SeqCst), 0);
+        assert!(daemon.state.item_states.is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]

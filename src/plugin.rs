@@ -5,7 +5,6 @@ use serde_json::{Value, json};
 
 use crate::config::{ItemConfig, PluginKind};
 use crate::error::BarrsError;
-use crate::ipc::EventPayload;
 use crate::process::run_command_with_timeout;
 use crate::rift::RiftSnapshot;
 
@@ -22,112 +21,56 @@ pub(crate) fn unavailable_snapshot() -> Value {
     })
 }
 
-pub trait Plugin: Send + Sync {
-    /// Returns the current plugin state as JSON for the item.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the plugin cannot read its data source.
-    fn snapshot(&self) -> Result<Value, BarrsError>;
-
-    /// Handles an input event sent to the item.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the plugin cannot process the event.
-    fn handle_event(&mut self, _event: &EventPayload) -> Result<(), BarrsError> {
-        Ok(())
-    }
-}
-
-#[must_use]
-pub fn from_item_config(item: &ItemConfig, rift: Option<&RiftSnapshot>) -> Option<Box<dyn Plugin>> {
-    let binding = item.plugin.as_ref()?;
-    match binding.kind {
-        PluginKind::Cpu => Some(Box::new(CpuPlugin)),
-        PluginKind::Time => Some(Box::new(TimePlugin)),
-        PluginKind::Date => Some(Box::new(DatePlugin {
-            format: binding
-                .format
-                .clone()
-                .unwrap_or_else(|| DEFAULT_DATE_FORMAT.into()),
-        })),
-        PluginKind::Battery => Some(Box::new(BatteryPlugin)),
-        PluginKind::Gpu => Some(Box::new(GpuPlugin)),
-        PluginKind::RiftWorkspaces => Some(Box::new(RiftWorkspacesPlugin {
-            snapshot: rift.cloned(),
-        })),
-        PluginKind::RiftLayout => Some(Box::new(RiftLayoutPlugin {
-            snapshot: rift.cloned(),
-        })),
-        // The daemon runs Lua update functions on the Lua executor, not as a Rust plugin.
-        PluginKind::Lua => None,
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct CpuPlugin;
-
-impl Plugin for CpuPlugin {
-    fn snapshot(&self) -> Result<Value, BarrsError> {
-        if let Some(snapshot) = cpu_snapshot_from_top() {
-            return Ok(snapshot);
-        }
-        Ok(unavailable_snapshot())
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct TimePlugin;
-
-impl Plugin for TimePlugin {
-    fn snapshot(&self) -> Result<Value, BarrsError> {
-        let formatted = format_local_time(TIME_FORMAT)?;
-        Ok(json!({
-            "text": formatted,
+/// Returns the current built-in snapshot, or `None` for Lua or no plugin.
+///
+/// # Errors
+///
+/// Returns an error when the local time or date cannot be formatted.
+pub fn from_item_config(
+    item: &ItemConfig,
+    rift: Option<&RiftSnapshot>,
+) -> Result<Option<Value>, BarrsError> {
+    let Some(binding) = item.plugin.as_ref() else {
+        return Ok(None);
+    };
+    let snapshot = match binding.kind {
+        PluginKind::Cpu => cpu_snapshot_from_top().unwrap_or_else(unavailable_snapshot),
+        PluginKind::Time => json!({
+            "text": format_local_time(TIME_FORMAT)?,
             "timezone": "local"
-        }))
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct DatePlugin {
-    pub format: String,
-}
-
-impl Plugin for DatePlugin {
-    fn snapshot(&self) -> Result<Value, BarrsError> {
-        let formatted = format_local_time(&self.format)?;
-        Ok(json!({
-            "text": formatted,
-            "timezone": "local",
-            "format": self.format,
-        }))
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct BatteryPlugin;
-
-impl Plugin for BatteryPlugin {
-    fn snapshot(&self) -> Result<Value, BarrsError> {
-        if let Some(snapshot) = battery_snapshot_from_pmset() {
-            return Ok(snapshot);
+        }),
+        PluginKind::Date => {
+            let format = binding.format.as_deref().unwrap_or(DEFAULT_DATE_FORMAT);
+            json!({
+                "text": format_local_time(format)?,
+                "timezone": "local",
+                "format": format,
+            })
         }
-        Ok(unavailable_snapshot())
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct GpuPlugin;
-
-impl Plugin for GpuPlugin {
-    fn snapshot(&self) -> Result<Value, BarrsError> {
-        if let Some(snapshot) = gpu_snapshot_from_ioreg() {
-            return Ok(snapshot);
-        }
-        Ok(unavailable_snapshot())
-    }
+        PluginKind::Battery => battery_snapshot_from_pmset().unwrap_or_else(unavailable_snapshot),
+        PluginKind::Gpu => gpu_snapshot_from_ioreg().unwrap_or_else(unavailable_snapshot),
+        PluginKind::RiftWorkspaces => rift.map_or_else(unavailable_snapshot, |snapshot| {
+            json!({
+                "text": snapshot.workspaces.iter().map(|workspace| workspace.name.as_str()).collect::<Vec<_>>().join(" "),
+                "current_workspace": snapshot.current_workspace,
+                "workspaces": snapshot.workspaces.iter().map(|workspace| json!({
+                    "name": workspace.name,
+                    "is_current": workspace.is_current,
+                    "window_count": workspace.window_count,
+                    "has_windows": workspace.has_windows
+                })).collect::<Vec<_>>(),
+            })
+        }),
+        PluginKind::RiftLayout => rift.map_or_else(unavailable_snapshot, |snapshot| {
+            json!({
+                "text": snapshot.layout,
+                "window_count": snapshot.window_count
+            })
+        }),
+        // The daemon runs Lua update functions on the Lua executor, not as a Rust plugin.
+        PluginKind::Lua => return Ok(None),
+    };
+    Ok(Some(snapshot))
 }
 
 fn cpu_snapshot_from_top() -> Option<Value> {
@@ -270,74 +213,39 @@ fn parse_battery_output(output: &str) -> Option<Value> {
     }))
 }
 
-#[derive(Debug, Clone)]
-pub struct RiftWorkspacesPlugin {
-    pub snapshot: Option<RiftSnapshot>,
-}
-
-impl Plugin for RiftWorkspacesPlugin {
-    fn snapshot(&self) -> Result<Value, BarrsError> {
-        let Some(snapshot) = self.snapshot.clone() else {
-            return Ok(unavailable_snapshot());
-        };
-        Ok(json!({
-            "text": snapshot.workspaces.iter().map(|workspace| workspace.name.as_str()).collect::<Vec<_>>().join(" "),
-            "current_workspace": snapshot.current_workspace,
-            "workspaces": snapshot.workspaces.iter().map(|workspace| json!({
-                "name": workspace.name,
-                "is_current": workspace.is_current,
-                "window_count": workspace.window_count,
-                "has_windows": workspace.has_windows
-            })).collect::<Vec<_>>(),
-        }))
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct RiftLayoutPlugin {
-    pub snapshot: Option<RiftSnapshot>,
-}
-
-impl Plugin for RiftLayoutPlugin {
-    fn snapshot(&self) -> Result<Value, BarrsError> {
-        let Some(snapshot) = self.snapshot.clone() else {
-            return Ok(unavailable_snapshot());
-        };
-        Ok(json!({
-            "text": snapshot.layout,
-            "window_count": snapshot.window_count
-        }))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::config::{ItemConfig, ItemHandlers, PluginBinding, PluginKind};
+    use crate::error::BarrsError;
     use crate::plugin::{
-        DatePlugin, Plugin, RiftLayoutPlugin, RiftWorkspacesPlugin, from_item_config,
-        parse_battery_output, parse_cpu_output, parse_gpu_output, unavailable_snapshot,
+        from_item_config, parse_battery_output, parse_cpu_output, parse_gpu_output,
+        unavailable_snapshot,
     };
     use crate::rift::{RiftSnapshot, RiftWorkspace};
 
-    #[test]
-    fn creates_builtin_plugin_from_config() {
-        let item = ItemConfig {
-            id: "cpu".into(),
+    fn item_with_plugin(kind: PluginKind, format: Option<String>) -> ItemConfig {
+        ItemConfig {
+            id: "item".into(),
             label: None,
             icon: None,
             placement: None,
             interval: Some(1),
             plugin: Some(PluginBinding {
-                kind: PluginKind::Cpu,
-                format: None,
+                kind,
+                format,
                 update: None,
             }),
             hover: None,
             handlers: ItemHandlers::default(),
-        };
+        }
+    }
 
-        let plugin = from_item_config(&item, None).expect("plugin");
-        let snapshot = plugin.snapshot().expect("snapshot");
+    #[test]
+    fn creates_builtin_snapshot_from_config() {
+        let item = item_with_plugin(PluginKind::Cpu, None);
+        let snapshot = from_item_config(&item, None)
+            .expect("snapshot")
+            .expect("built-in data");
         let text = snapshot["text"].as_str().expect("text");
         assert!(text.ends_with('%') || text == super::PLACEHOLDER_TEXT);
     }
@@ -351,8 +259,10 @@ mod tests {
 
     #[test]
     fn rift_workspaces_plugin_reports_unavailable_without_snapshot() {
-        let plugin = RiftWorkspacesPlugin { snapshot: None };
-        let snapshot = plugin.snapshot().expect("snapshot");
+        let item = item_with_plugin(PluginKind::RiftWorkspaces, None);
+        let snapshot = from_item_config(&item, None)
+            .expect("snapshot")
+            .expect("built-in data");
         assert_eq!(snapshot["text"], super::PLACEHOLDER_TEXT);
         assert_eq!(snapshot["available"], false);
         assert!(snapshot.get("workspaces").is_none());
@@ -360,8 +270,10 @@ mod tests {
 
     #[test]
     fn rift_layout_plugin_reports_unavailable_without_snapshot() {
-        let plugin = RiftLayoutPlugin { snapshot: None };
-        let snapshot = plugin.snapshot().expect("snapshot");
+        let item = item_with_plugin(PluginKind::RiftLayout, None);
+        let snapshot = from_item_config(&item, None)
+            .expect("snapshot")
+            .expect("built-in data");
         assert_eq!(snapshot["text"], super::PLACEHOLDER_TEXT);
         assert_eq!(snapshot["available"], false);
         assert!(snapshot.get("window_count").is_none());
@@ -409,8 +321,9 @@ mod tests {
             window_count: 4,
         };
 
-        let plugin = from_item_config(&item, Some(&rift)).expect("plugin");
-        let snapshot = plugin.snapshot().expect("snapshot");
+        let snapshot = from_item_config(&item, Some(&rift))
+            .expect("snapshot")
+            .expect("built-in data");
         assert_eq!(snapshot["current_workspace"], "2");
         assert_eq!(snapshot["text"], "1 2 3");
         assert_eq!(snapshot["workspaces"][0]["has_windows"], true);
@@ -465,8 +378,9 @@ mod tests {
             handlers: ItemHandlers::default(),
         };
 
-        let plugin = from_item_config(&item, None).expect("plugin");
-        let snapshot = plugin.snapshot().expect("snapshot");
+        let snapshot = from_item_config(&item, None)
+            .expect("snapshot")
+            .expect("built-in data");
         let text = snapshot["text"].as_str().expect("time text");
         assert_eq!(text.len(), 5);
         assert_eq!(text.chars().nth(2), Some(':'));
@@ -489,19 +403,19 @@ mod tests {
             handlers: ItemHandlers::default(),
         };
 
-        let plugin = from_item_config(&item, None).expect("plugin");
-        let snapshot = plugin.snapshot().expect("snapshot");
+        let snapshot = from_item_config(&item, None)
+            .expect("snapshot")
+            .expect("built-in data");
         assert_eq!(snapshot["format"], "%Y-%m-%d");
         assert!(!snapshot["text"].as_str().expect("date text").is_empty());
     }
 
     #[test]
     fn date_plugin_formats_current_date() {
-        let plugin = DatePlugin {
-            format: "%Y-%m-%d".into(),
-        };
-
-        let snapshot = plugin.snapshot().expect("snapshot");
+        let item = item_with_plugin(PluginKind::Date, Some("%Y-%m-%d".into()));
+        let snapshot = from_item_config(&item, None)
+            .expect("snapshot")
+            .expect("built-in data");
         let text = snapshot["text"].as_str().expect("date text");
         assert!(!text.is_empty());
         assert_eq!(snapshot["timezone"], "local");
@@ -510,14 +424,24 @@ mod tests {
 
     #[test]
     fn date_plugin_uses_known_format() {
-        let plugin = DatePlugin {
-            format: "%Y".into(),
-        };
-
-        let snapshot = plugin.snapshot().expect("snapshot");
+        let item = item_with_plugin(PluginKind::Date, Some("%Y".into()));
+        let snapshot = from_item_config(&item, None)
+            .expect("snapshot")
+            .expect("built-in data");
         let text = snapshot["text"].as_str().expect("date text");
         assert_eq!(text.len(), 4);
         assert!(text.chars().all(|ch| ch.is_ascii_digit()));
         assert_eq!(snapshot["format"], "%Y");
+    }
+
+    #[test]
+    fn date_plugin_returns_formatting_error() {
+        let item = item_with_plugin(PluginKind::Date, Some("x".repeat(256)));
+
+        let error = from_item_config(&item, None).expect_err("format exceeds output buffer");
+        assert!(matches!(
+            error,
+            BarrsError::Unsupported(message) if message == "failed to format local time"
+        ));
     }
 }

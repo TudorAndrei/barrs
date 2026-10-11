@@ -25,9 +25,10 @@ signal. `run` loads the Lua configuration, constructs a renderer, and gives both
 to `src/daemon.rs`.
 
 The daemon owns the Unix socket, scheduled plugin refreshes, configuration
-reloads, renderer events, and the latest item snapshots. It turns each
-configuration item into a plugin via `src/plugin.rs` and transforms plugin data
-into renderer snapshots through `src/render.rs`. The native renderer is
+reloads, renderer events, and the latest item snapshots. `src/plugin.rs`
+selects a built-in snapshot from the item's plugin kind and returns JSON data
+directly. The daemon transforms that data into renderer snapshots through
+`src/render.rs`. Lua updates run on the Lua executor. The native renderer is
 macOS/AppKit-specific and is intentionally current-thread only; the noop
 renderer supports tests and non-visual operation.
 
@@ -65,7 +66,7 @@ bounded child-process execution for platform queries and the CLI fallback.
 - Lua configuration schema and validation: `src/config.rs`
 - Daemon lifecycle, scheduler, and snapshots: `src/daemon.rs`
 - Framed Unix-socket protocol: `src/ipc.rs`
-- Plugin abstraction and built-in providers: `src/plugin.rs`
+- Built-in snapshot selection and data: `src/plugin.rs`
 - Rendering model and native AppKit host: `src/render.rs`
 - Rift backends and event application: `src/rift.rs`
 - Timed subprocess helper: `src/process.rs`
