@@ -112,6 +112,7 @@ Configuration is written in Lua and currently covers:
 - icons and labels
 - per-item refresh intervals with `interval`
 - built-in plugin bindings
+- Lua update functions that set item text
 - hover tooltips
 - click and hover handlers
 
@@ -163,7 +164,8 @@ for scroll events, and both are otherwise `nil`. Handler return values are
 ignored. A configured handler name must exist when the config is loaded. If a
 handler raises an error while processing an IPC request, the daemon returns an
 error response and the CLI exits nonzero; errors from native renderer events
-are logged by the daemon.
+are logged by the daemon. A handler that runs longer than 1 second is stopped
+with an error.
 
 The bundled sample records the most recent time-item event in Lua state without
 launching external programs:
@@ -173,6 +175,46 @@ function record_time_event(ctx)
   last_time_event = ctx.event
 end
 ```
+
+### Lua update functions
+
+A `lua` plugin sets an item's text from a global Lua function. The daemon calls
+the function named by `update` when the config loads, every `interval` seconds
+(default: `5`), and directly after a handler of that item processes a click,
+right click, or scroll:
+
+```lua
+function memory_usage(ctx)
+  local pipe = io.popen("memory_pressure")
+  local output = pipe:read("*a")
+  pipe:close()
+  local free = tonumber(output:match("free percentage: (%d+)%%"))
+  return { text = (100 - free) .. "%", free = free }
+end
+
+return {
+  items = {
+    {
+      id = "memory",
+      interval = 5,
+      plugin = { kind = "lua", update = "memory_usage" },
+    },
+  },
+}
+```
+
+Each call receives `ctx = { item_id = "memory", timestamp_ms = 0 }`. Return a
+string, or a table with a string `text`. The other fields of the table stay in
+the item data that `barrs dump-state` shows. The result must be smaller than
+16 KiB as JSON.
+
+Update functions and event handlers run on one Lua thread and share Lua globals,
+so the bar and IPC requests stay responsive while a function runs. Only one call
+per item runs at a time. A function that raises an error, returns an invalid
+value, or runs longer than 5 seconds makes the item show `—` until its next
+successful call. The time limit counts Lua instructions, so it cannot stop a
+function that waits inside one C call, such as a long `io.popen` or
+`os.execute`. Each reload starts a new Lua thread with fresh globals.
 
 The bar also accepts SketchyBar-style notch settings:
 
@@ -231,6 +273,7 @@ The bundled default config also sets explicit intervals for `cpu`, `gpu`,
 - `date`
 - `rift_workspaces`
 - `rift_layout`
+- `lua` (see [Lua update functions](#lua-update-functions))
 
 ## Command overview
 

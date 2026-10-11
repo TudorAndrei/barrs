@@ -17,11 +17,41 @@ only serializable request/result values with the daemon. The daemon remains the
 owner of scheduling, item state, and rendering; the executor remains the owner
 of the one loaded Lua runtime and its persistent Lua globals.
 
-This is a design decision, not an implemented API. It is conditional on proving
-that the chosen `mlua` version can enforce a cooperative instruction/time budget
-and that the executor can be replaced transactionally on reload. If either is
-not demonstrated by a prototype, this direction is **no-go** rather than a
-reason to run providers on the renderer/daemon thread.
+**Status: implemented.** `mlua` 0.12 enforces the instruction/time budget with a
+global instruction-count hook (1 s for handlers, 5 s for providers), and reload
+starts a new executor before it replaces the old one. The implemented API uses a
+`lua` plugin kind instead of the `provider` field proposed below; see
+[Implemented configuration API](#implemented-configuration-api).
+
+## Implemented configuration API
+
+```lua
+function project_status(ctx)
+  return { text = "api: ready", icon = "✓", pending_jobs = 2 }
+end
+
+return {
+  items = {
+    {
+      id = "project-status",
+      interval = 5, -- optional, default 5 seconds
+      plugin = { kind = "lua", update = "project_status" },
+    },
+  },
+}
+```
+
+- `update` is required for `kind = "lua"` and rejected for every other kind. The
+  named global function must exist when the config loads.
+- The function returns a string, which becomes `text`, or a table that
+  serializes to a JSON object with a string `text`, at most 16 KiB.
+- The context is `{ item_id, timestamp_ms }`.
+- The first call runs when the config loads. A click, right click, or scroll on
+  the item also requests a call at once.
+- A failure, invalid result, or timeout publishes `{ text = "—", available =
+  false }` and logs the error to stderr.
+- Because the provider is a plugin kind, an item cannot also bind another
+  plugin, so no conflict rule is necessary.
 
 ## User stories
 
@@ -32,7 +62,7 @@ reason to run providers on the renderer/daemon thread.
 - A slow or failing provider presents a stable unavailable item without blocking
   pointer handling, AppKit presentation, IPC framing, or unrelated refreshes.
 
-## Candidate configuration API
+## Candidate configuration API (superseded)
 
 `provider` is a **new** item field. It names a global Lua function; `interval`
 already exists and controls its scheduled refresh cadence. A provider item must
