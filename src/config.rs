@@ -47,6 +47,21 @@ impl Config {
     pub fn socket_path(&self) -> PathBuf {
         self.socket_path.clone().unwrap_or_else(default_socket_path)
     }
+
+    /// The item with `id`.
+    #[must_use]
+    pub fn item(&self, id: &str) -> Option<&ItemConfig> {
+        self.item_with_order(id).map(|(_, item)| item)
+    }
+
+    /// The item with `id` and its position in config order.
+    #[must_use]
+    pub fn item_with_order(&self, id: &str) -> Option<(usize, &ItemConfig)> {
+        self.items
+            .iter()
+            .enumerate()
+            .find(|(_, item)| item.id == id)
+    }
 }
 
 impl Default for Config {

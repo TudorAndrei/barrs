@@ -58,7 +58,6 @@ pub struct RiftWorkspace {
     pub is_current: bool,
     /// Exact count from Rift's workspace snapshot or windows-changed payload.
     pub window_count: usize,
-    pub has_windows: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,7 +314,6 @@ fn mach_snapshot() -> Result<RiftSnapshot, BarrsError> {
                 name: active.display_name(),
                 is_current: true,
                 window_count,
-                has_windows: window_count > 0,
             }]
         } else {
             workspaces
@@ -324,7 +322,6 @@ fn mach_snapshot() -> Result<RiftSnapshot, BarrsError> {
                     name: workspace.display_name(),
                     is_current: workspace.active,
                     window_count: workspace.window_count.unwrap_or(0),
-                    has_windows: workspace.window_count.unwrap_or(0) > 0,
                 })
                 .collect()
         },
@@ -360,7 +357,6 @@ fn cli_snapshot() -> Option<RiftSnapshot> {
                 name: active.display_name(),
                 is_current: true,
                 window_count,
-                has_windows: window_count > 0,
             }]
         } else {
             workspaces
@@ -369,7 +365,6 @@ fn cli_snapshot() -> Option<RiftSnapshot> {
                     name: workspace.display_name(),
                     is_current: workspace.active,
                     window_count: workspace.window_count.unwrap_or(0),
-                    has_windows: workspace.window_count.unwrap_or(0) > 0,
                 })
                 .collect()
         },
@@ -612,13 +607,8 @@ fn apply_windows_changed(snapshot: &mut RiftSnapshot, payload: &Value) -> RiftAp
     for workspace in &mut snapshot.workspaces {
         if workspace.name == target_name {
             found = true;
-            let has_windows = window_count > 0;
             if workspace.window_count != window_count {
                 workspace.window_count = window_count;
-                changed = true;
-            }
-            if workspace.has_windows != has_windows {
-                workspace.has_windows = has_windows;
                 changed = true;
             }
             if workspace.is_current && snapshot.window_count != window_count {
@@ -1081,13 +1071,11 @@ mod tests {
                     name: "1".into(),
                     is_current: true,
                     window_count: 1,
-                    has_windows: true,
                 },
                 RiftWorkspace {
                     name: "2".into(),
                     is_current: false,
                     window_count: 3,
-                    has_windows: true,
                 },
             ],
             layout: "tiling".into(),
@@ -1117,13 +1105,11 @@ mod tests {
                     name: "1".into(),
                     is_current: false,
                     window_count: 0,
-                    has_windows: false,
                 },
                 RiftWorkspace {
                     name: "2".into(),
                     is_current: true,
                     window_count: 1,
-                    has_windows: true,
                 },
             ],
             layout: "tiling".into(),
@@ -1137,7 +1123,6 @@ mod tests {
             },
         );
         assert_eq!(changed, RiftApplyResult::Updated);
-        assert!(snapshot.workspaces[0].has_windows);
         assert_eq!(snapshot.workspaces[0].window_count, 2);
         assert_eq!(snapshot.window_count, 1);
     }
@@ -1151,19 +1136,16 @@ mod tests {
                     name: "1".into(),
                     is_current: false,
                     window_count: 0,
-                    has_windows: false,
                 },
                 RiftWorkspace {
                     name: "2".into(),
                     is_current: false,
                     window_count: 1,
-                    has_windows: true,
                 },
                 RiftWorkspace {
                     name: "3".into(),
                     is_current: true,
                     window_count: 3,
-                    has_windows: true,
                 },
             ],
             layout: "tiling".into(),
@@ -1202,7 +1184,6 @@ mod tests {
                 name: "1".into(),
                 is_current: true,
                 window_count: 1,
-                has_windows: true,
             }],
             layout: "tiling".into(),
             window_count: 1,

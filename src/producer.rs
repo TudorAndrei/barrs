@@ -24,6 +24,8 @@ pub type ProducedItem = (String, Result<RenderItemSnapshot, BarrsError>);
 /// paths that read Rift keep one cache and published signature.
 pub struct SnapshotProducer<T> {
     backend: Arc<dyn RiftBackend>,
+    /// Rift events for the Rift consumers of the current config.
+    subscription: Option<RiftSubscription>,
     rift: RiftTracker,
     /// Sequence of the next request or Rift resync fetch.
     next_seq: u64,
@@ -72,12 +74,11 @@ impl<T> Production<T> {
 #[derive(Debug)]
 pub struct RiftUse {
     seq: u64,
-    reads_rift: bool,
     covers_consumers: bool,
-    /// The snapshot fetched for this production, when the fetch succeeded.
-    fetched: Option<RiftSnapshot>,
-    /// Signature of the snapshot that the produced items show.
-    shown: Option<u64>,
+    /// The snapshot that the produced items show.
+    shown: Option<RiftSnapshot>,
+    /// Whether `shown` was fetched for this production, not read from the cache.
+    fetched: bool,
 }
 
 #[derive(Debug, Default)]
@@ -104,7 +105,8 @@ impl<T: Send + 'static> SnapshotProducer<T> {
         let (sender, receiver) = mpsc::unbounded_channel();
         Self {
             backend,
-            rift: RiftTracker::new(),
+            subscription: None,
+            rift: RiftTracker::default(),
             next_seq: 1,
             rift_seq: 0,
             resync: Resync::default(),
@@ -119,15 +121,16 @@ impl<T: Send + 'static> SnapshotProducer<T> {
         self.backend.kind()
     }
 
-    /// Subscribes to Rift events when `config` has Rift consumers.
-    #[must_use]
-    pub fn subscribe(&self, config: &Config) -> Option<RiftSubscription> {
-        has_rift_consumers(config)
+    /// Subscribes to Rift events when `config` has Rift consumers, and
+    /// drops the subscription of the previous config.
+    pub fn watch(&mut self, config: &Config) {
+        self.subscription = has_rift_consumers(config)
             .then(|| self.backend.subscribe())
-            .flatten()
+            .flatten();
     }
 
     /// The cached Rift snapshot.
+    #[cfg(test)]
     #[must_use]
     pub const fn rift_snapshot(&self) -> Option<&RiftSnapshot> {
         self.rift.snapshot()
@@ -184,9 +187,29 @@ impl<T: Send + 'static> SnapshotProducer<T> {
         }
     }
 
+    /// Applies the Rift events received since the last poll, and returns the
+    /// snapshots of the Rift consumers of `config` that must render again.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a Rift consumer cannot produce its content.
+    pub fn poll_rift(
+        &mut self,
+        config: &Config,
+        now: Instant,
+    ) -> Result<Vec<RenderItemSnapshot>, BarrsError> {
+        let events = self
+            .subscription
+            .as_ref()
+            .map(RiftSubscription::drain)
+            .unwrap_or_default();
+        self.on_rift_events(&events, now);
+        self.due_rift_renders(config, now)
+    }
+
     /// Applies Rift events to the tracker, and starts a resync fetch when the
     /// tracker needs a fresh snapshot.
-    pub fn on_rift_events(&mut self, events: &[RiftEvent], now: Instant) {
+    fn on_rift_events(&mut self, events: &[RiftEvent], now: Instant) {
         if self.rift.on_events(events, now) != RiftEventsOutcome::NeedsSnapshot {
             return;
         }
@@ -203,24 +226,22 @@ impl<T: Send + 'static> SnapshotProducer<T> {
     /// production covered every Rift consumer, its snapshot becomes the
     /// published one.
     pub fn record(&mut self, rift: RiftUse, now: Instant) {
-        if let Some(fetched) = rift.fetched
+        let shown = rift.shown.as_ref().map(RiftSnapshot::signature);
+        if rift.fetched
+            && let Some(fetched) = rift.shown
             && rift.seq > self.rift_seq
         {
             self.rift_seq = rift.seq;
             self.rift.store(fetched, now);
         }
-        if rift.reads_rift && rift.covers_consumers {
-            self.rift.mark_published(rift.shown, now);
+        if rift.covers_consumers {
+            self.rift.mark_published(shown, now);
         }
     }
 
     /// Ends a due Rift debounce cycle, and returns the snapshots of the Rift
     /// consumers when the cached snapshot differs from the published one.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a Rift consumer cannot produce its content.
-    pub fn due_rift_renders(
+    fn due_rift_renders(
         &mut self,
         config: &Config,
         now: Instant,
@@ -275,14 +296,12 @@ fn has_rift_consumers(config: &Config) -> bool {
 
 impl Job {
     fn run(self) -> (Vec<ProducedItem>, RiftUse) {
-        let reads_rift = self.rift.is_some();
-        let (fetched, shown_snapshot, covers_consumers) = match self.rift {
-            Some(rift) => {
-                let fetched = rift.backend.snapshot().ok();
-                let shown = fetched.clone().or(rift.cached);
-                (fetched, shown, rift.covers_consumers)
-            }
-            None => (None, None, false),
+        let (shown, fetched, covers_consumers) = match self.rift {
+            Some(rift) => match rift.backend.snapshot() {
+                Ok(fetched) => (Some(fetched), true, rift.covers_consumers),
+                Err(_) => (rift.cached, false, rift.covers_consumers),
+            },
+            None => (None, false, false),
         };
         let items = self
             .items
@@ -290,15 +309,14 @@ impl Job {
             .map(|(order, item)| {
                 (
                     item.id.clone(),
-                    snapshot_for_item(item, *order, shown_snapshot.as_ref()),
+                    snapshot_for_item(item, *order, shown.as_ref()),
                 )
             })
             .collect();
         let rift = RiftUse {
             seq: self.seq,
-            reads_rift,
             covers_consumers,
-            shown: shown_snapshot.as_ref().map(RiftSnapshot::signature),
+            shown,
             fetched,
         };
         (items, rift)
@@ -363,7 +381,6 @@ mod tests {
                 name: current.into(),
                 is_current: true,
                 window_count: 1,
-                has_windows: true,
             }],
             layout: "tiling".into(),
             window_count: 1,

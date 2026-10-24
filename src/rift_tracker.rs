@@ -34,15 +34,6 @@ pub struct RiftTracker {
 }
 
 impl RiftTracker {
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            snapshot: None,
-            published: None,
-            deadline: None,
-        }
-    }
-
     /// The cached snapshot, if the tracker has one.
     #[must_use]
     pub const fn snapshot(&self) -> Option<&RiftSnapshot> {
@@ -154,7 +145,6 @@ mod tests {
                     name: name.into(),
                     is_current: name == current,
                     window_count: 1,
-                    has_windows: true,
                 })
                 .collect(),
             layout: "tiling".into(),
@@ -179,7 +169,7 @@ mod tests {
 
     /// A tracker whose consumers show `shown`.
     fn published(shown: &RiftSnapshot, now: Instant) -> RiftTracker {
-        let mut tracker = RiftTracker::new();
+        let mut tracker = RiftTracker::default();
         tracker.store(shown.clone(), now);
         tracker.mark_published(Some(shown.signature()), now);
         tracker
@@ -230,7 +220,7 @@ mod tests {
     #[test]
     fn an_inexact_event_or_an_empty_cache_needs_a_fresh_snapshot() {
         let now = Instant::now();
-        let mut tracker = RiftTracker::new();
+        let mut tracker = RiftTracker::default();
         assert_eq!(
             tracker.on_events(&[switch_to(1)], now),
             RiftEventsOutcome::NeedsSnapshot
@@ -250,7 +240,7 @@ mod tests {
     #[test]
     fn publishing_the_cached_snapshot_ends_its_debounce() {
         let now = Instant::now();
-        let mut tracker = RiftTracker::new();
+        let mut tracker = RiftTracker::default();
         let fresh = snapshot("2");
         tracker.store(fresh.clone(), now);
 

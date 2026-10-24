@@ -450,7 +450,6 @@ mod tests {
             name: name.into(),
             is_current,
             window_count,
-            has_windows: window_count > 0,
         };
         let rift = RiftSnapshot {
             current_workspace: "2".into(),
