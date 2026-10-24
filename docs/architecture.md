@@ -25,7 +25,9 @@ signal. `run` loads the Lua configuration, constructs a renderer, and gives both
 to `src/daemon.rs`.
 
 The daemon owns the Unix socket, scheduled plugin refreshes, configuration
-reloads, renderer events, and the latest item snapshots. Each item has a typed
+reloads, and the bar, `src/bar.rs#struct:Bar`: the renderer and the snapshot of
+each item that it shows. A snapshot becomes a shown item only when the
+renderer draws it, and `dump-state` reads the shown items. Each item has a typed
 item source, `src/source.rs#enum:ItemSource`: a system plugin, a Rift plugin,
 a Lua update function, or a fixed label. The daemon asks the source for its
 default refresh interval, whether it reads a Rift snapshot, its Lua update
@@ -53,8 +55,12 @@ the renderer's interactive flags all read it through
 runs the update after a click, right click, or scroll handler, and discards
 update results of an older config epoch. An item trigger request answers when
 its handler ends, or when the new snapshot of a non-Lua item is shown. The
-native renderer is macOS/AppKit-specific and is intentionally current-thread
-only; the noop renderer supports tests and non-visual operation.
+renderer interface, `src/render.rs#trait:Renderer`, has the operations that
+the daemon uses: a transactional reconcile of the complete next snapshot set
+(ADR-0010), one item update, and renderer events. The native renderer is
+macOS/AppKit-specific and is intentionally current-thread only; it draws
+through a native host, the `AppKit` host or a mock host for tests. The noop
+renderer supports tests and non-visual operation.
 
 The daemon directly owns its state. Its event loop processes stateful requests
 and results in order. Connection tasks parse requests, the blocking snapshot
@@ -108,6 +114,7 @@ bounded child-process execution for platform queries and the CLI fallback.
 - Item sources and their refresh policy: `src/source.rs`
 - Built-in system and Rift snapshot data: `src/plugin.rs`
 - Item content shared by producers and the renderer: `src/content.rs`
+- Shown items and their renderer: `src/bar.rs`
 - Rendering model and native AppKit host: `src/render.rs`
 - Rift backends and event application: `src/rift.rs`
 - Rift snapshot cache and render debounce: `src/rift_tracker.rs`

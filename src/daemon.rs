@@ -11,6 +11,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{self, Duration, Instant};
 
+use crate::bar::Bar;
 use crate::config::{Config, ItemConfig};
 use crate::content::ItemContent;
 use crate::error::BarrsError;
@@ -114,8 +115,8 @@ struct DaemonState<R: Renderer> {
     lua: LuaDispatch<EventReply>,
     backend: RiftBackendKind,
     rift_subscription: Option<RiftSubscription>,
-    renderer: R,
-    item_states: HashMap<String, RenderItemSnapshot>,
+    /// The renderer and the items that it shows; `dump-state` reads them.
+    bar: Bar<R>,
     refresh_deadlines: HashMap<String, Instant>,
 }
 
@@ -142,8 +143,7 @@ impl<R: Renderer> Daemon<R> {
             lua: LuaDispatch::new(lua),
             backend,
             rift_subscription,
-            renderer,
-            item_states: HashMap::new(),
+            bar: Bar::new(renderer),
         };
         Ok(Self {
             config_path,
@@ -270,7 +270,7 @@ impl<R: Renderer> Daemon<R> {
                     config_path: self.config_path.clone(),
                 })
             }
-            Request::DumpState => Ok(Response::State(json!(self.state.item_states))),
+            Request::DumpState => Ok(Response::State(json!(self.state.bar.items()))),
             Request::RiftBackend => Ok(Response::RiftBackend {
                 backend: self.state.backend,
             }),
@@ -322,14 +322,13 @@ impl<R: Renderer> Daemon<R> {
             .map(|(_, snapshot)| snapshot)
             .collect::<Result<Vec<_>, _>>()?;
         let state = &mut self.state;
-        state.renderer.reconcile(&config, &next_states)?;
+        state.bar.reconcile(&config, next_states)?;
         state.backend = backend;
         state.config = config;
         state.lua.replace(lua);
         let now = Instant::now();
         state.refresh_deadlines = build_refresh_deadlines(&state.config, now, state.backend);
         state.rift_subscription = self.producer.subscribe(&state.config);
-        state.item_states = index_snapshots(next_states);
         self.producer.record(rift, now);
         Ok(())
     }
@@ -401,12 +400,12 @@ impl<R: Renderer> Daemon<R> {
                 }
                 Ok(())
             }
-            Dispatched::Updated { item_id, content } => self.show_update(item_id, content),
+            Dispatched::Updated { item_id, content } => self.show_update(&item_id, content),
         }
     }
 
     /// Renders the content of one Lua update function call.
-    fn show_update(&mut self, item_id: String, content: ItemContent) -> Result<(), BarrsError> {
+    fn show_update(&mut self, item_id: &str, content: ItemContent) -> Result<(), BarrsError> {
         let state = &mut self.state;
         let Some((order, item)) = state
             .config
@@ -417,17 +416,15 @@ impl<R: Renderer> Daemon<R> {
         else {
             return Ok(());
         };
-        let snapshot = RenderItemSnapshot::from_item_config(item, order, content);
         advance_refresh_deadlines(
             &mut state.refresh_deadlines,
             &state.config,
             state.backend,
-            std::slice::from_ref(&item_id),
+            std::slice::from_ref(&item.id),
             Instant::now(),
         );
-        state.renderer.render_item(&snapshot)?;
-        state.item_states.insert(item_id, snapshot);
-        Ok(())
+        let snapshot = RenderItemSnapshot::from_item_config(item, order, content);
+        state.bar.show(snapshot)
     }
 
     /// Applies a finished production for the purpose that requested it.
@@ -446,8 +443,7 @@ impl<R: Renderer> Daemon<R> {
                     .map(|(_, snapshot)| snapshot)
                     .collect::<Result<Vec<_>, _>>()?;
                 let state = &mut self.state;
-                state.renderer.reconcile(&state.config, &snapshots)?;
-                state.item_states = index_snapshots(snapshots);
+                state.bar.reconcile(&state.config, snapshots)?;
                 self.producer.record(rift, Instant::now());
                 Ok(())
             }
@@ -459,10 +455,7 @@ impl<R: Renderer> Daemon<R> {
                 let state = &mut self.state;
                 for (item_id, snapshot) in items {
                     match snapshot {
-                        Ok(snapshot) => {
-                            state.renderer.render_item(&snapshot)?;
-                            state.item_states.insert(item_id, snapshot);
-                        }
+                        Ok(snapshot) => state.bar.show(snapshot)?,
                         Err(error) => eprintln!("barrs: snapshot for {item_id} failed: {error}"),
                     }
                 }
@@ -515,17 +508,15 @@ impl<R: Renderer> Daemon<R> {
         rift: RiftUse,
     ) -> Result<(), BarrsError> {
         let state = &mut self.state;
-        for (item_id, snapshot) in items {
-            let snapshot = snapshot?;
-            state.renderer.render_item(&snapshot)?;
-            state.item_states.insert(item_id, snapshot);
+        for (_, snapshot) in items {
+            state.bar.show(snapshot?)?;
         }
         self.producer.record(rift, Instant::now());
         Ok(())
     }
 
     fn process_renderer_events(&mut self) -> Result<(), BarrsError> {
-        for event in self.state.renderer.drain_events()? {
+        for event in self.state.bar.drain_events()? {
             self.deliver_event(&event, None);
         }
         Ok(())
@@ -541,8 +532,7 @@ impl<R: Renderer> Daemon<R> {
         self.producer.on_rift_events(&events, now);
         let state = &mut self.state;
         for snapshot in self.producer.due_rift_renders(&state.config, now)? {
-            state.renderer.render_item(&snapshot)?;
-            state.item_states.insert(snapshot.id.clone(), snapshot);
+            state.bar.show(snapshot)?;
         }
         Ok(())
     }
@@ -559,7 +549,7 @@ impl<R: Renderer> Daemon<R> {
             answer_event(reply, Err(error));
             return;
         };
-        if let Err(error) = state.renderer.handle_event(payload) {
+        if let Err(error) = state.bar.handle_event(payload) {
             answer_event(reply, Err(error));
             return;
         }
@@ -596,13 +586,6 @@ fn event_delivered() -> Response {
 
 fn all_item_ids(config: &Config) -> Vec<String> {
     config.items.iter().map(|item| item.id.clone()).collect()
-}
-
-fn index_snapshots(snapshots: Vec<RenderItemSnapshot>) -> HashMap<String, RenderItemSnapshot> {
-    snapshots
-        .into_iter()
-        .map(|snapshot| (snapshot.id.clone(), snapshot))
-        .collect()
 }
 
 fn cleanup_socket(path: &Path) -> Result<(), BarrsError> {
@@ -1033,7 +1016,7 @@ return {{
     }
 
     fn shown_workspace<R: Renderer>(daemon: &Daemon<R>) -> String {
-        match &daemon.state.item_states["workspaces"].content {
+        match &daemon.state.bar.items()["workspaces"].content {
             crate::content::ItemContent::Workspaces { current, .. } => current.clone(),
             other => panic!("unexpected workspaces content {other:?}"),
         }
@@ -1719,7 +1702,7 @@ return {{
             "1"
         );
         daemon.refresh_all_items().await.expect("initial render");
-        assert_eq!(daemon.state.item_states["generation"].content.text(), "1");
+        assert_eq!(daemon.state.bar.items()["generation"].content.text(), "1");
         dispatch(
             &mut daemon,
             crate::ipc::EventPayload::from_trigger(
@@ -1735,7 +1718,7 @@ return {{
             fs::read_to_string(&evaluation_path).expect("evaluation"),
             "2"
         );
-        assert_eq!(daemon.state.item_states["generation"].content.text(), "2");
+        assert_eq!(daemon.state.bar.items()["generation"].content.text(), "2");
         dispatch(
             &mut daemon,
             crate::ipc::EventPayload::from_trigger(
@@ -1807,10 +1790,10 @@ return {{
         assert_eq!(shown_workspace(&daemon), "3");
         assert_eq!(backend.fetches(), 2);
         let later = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
-        let renders = daemon.state.renderer.renders.load(Ordering::SeqCst);
+        let renders = daemon.state.bar.renderer().renders.load(Ordering::SeqCst);
         daemon.process_rift_events(later).expect("no-op poll");
         assert_eq!(
-            daemon.state.renderer.renders.load(Ordering::SeqCst),
+            daemon.state.bar.renderer().renders.load(Ordering::SeqCst),
             renders
         );
     }
@@ -1847,7 +1830,7 @@ return {{
         }
 
         assert!(matches!(response.try_recv(), Ok(Response::Ok { .. })));
-        let mut item_ids = daemon.state.item_states.keys().cloned().collect::<Vec<_>>();
+        let mut item_ids = daemon.state.bar.items().keys().cloned().collect::<Vec<_>>();
         item_ids.sort();
         assert_eq!(item_ids, vec!["new"]);
     }
@@ -1868,11 +1851,12 @@ return {{
         reload(&mut daemon).await.expect("reload");
 
         let state = &daemon.state;
-        let mut item_ids = state.item_states.keys().cloned().collect::<Vec<_>>();
+        let mut item_ids = state.bar.items().keys().cloned().collect::<Vec<_>>();
         item_ids.sort();
         assert_eq!(item_ids, vec!["new", "retained"]);
         let mut rendered_ids = state
-            .renderer
+            .bar
+            .renderer()
             .surface_state()
             .items
             .iter()
@@ -1911,9 +1895,9 @@ return {{
 
         let state = &daemon.state;
         assert_eq!(state.config.items[0].id, "retained");
-        assert!(state.item_states.contains_key("retained"));
-        assert!(!state.item_states.contains_key("old"));
-        assert!(!state.item_states.contains_key("new"));
+        assert!(state.bar.items().contains_key("retained"));
+        assert!(!state.bar.items().contains_key("old"));
+        assert!(!state.bar.items().contains_key("new"));
 
         assert_eq!(reconciles.load(Ordering::SeqCst), 2);
     }
@@ -2118,7 +2102,12 @@ return {{
 
         let state = &daemon.state;
         assert_eq!(
-            state.renderer.surface_state().active_hover_item.as_deref(),
+            state
+                .bar
+                .renderer()
+                .surface_state()
+                .active_hover_item
+                .as_deref(),
             Some("clock")
         );
     }
@@ -2226,7 +2215,7 @@ return {{
                 if message == "unsupported operation: failed to format local time"
         ));
         assert_eq!(renders.load(Ordering::SeqCst), 0);
-        assert!(daemon.state.item_states.is_empty());
+        assert!(daemon.state.bar.items().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]

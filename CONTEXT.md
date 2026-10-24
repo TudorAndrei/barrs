@@ -43,6 +43,10 @@ item sources into renderer snapshots on blocking tasks, reads Rift through the
 injected Rift backend, and keeps the Rift tracker current. _Avoid_: refresher,
 fetcher.
 
+**Bar**: the renderer and the snapshot of each item that it shows now
+(`Bar`). The daemon shows a snapshot or reconciles a complete set through it;
+`dump-state` reads its shown items. _Avoid_: item states, published state.
+
 **Staged reload**: a loaded config and Lua runtime that wait for their
 complete snapshot set before they replace the current ones. _Avoid_: pending
 config.

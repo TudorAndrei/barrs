@@ -1,4 +1,5 @@
 pub mod app;
+mod bar;
 pub mod cli;
 pub mod config;
 pub mod content;
