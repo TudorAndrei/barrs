@@ -928,7 +928,9 @@ impl AppKitHost {
     fn invalidate_native_window(&mut self, reason: &str) {
         debug_display_state(reason, None);
         if let Some(window) = self.window.take() {
-            window.orderOut(None);
+            // `close` also removes the window from the app's window list, which
+            // would keep it, and its item views, alive after `orderOut`.
+            window.close();
         }
         self.content_view = None;
         self.item_views.clear();
