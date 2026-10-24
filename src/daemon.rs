@@ -22,7 +22,7 @@ use crate::lua_dispatch::{Dispatched, LuaDispatch};
 use crate::lua_executor::LuaExecutor;
 use crate::producer::{Completion, ProducedItem, RiftUse, SnapshotProducer};
 use crate::render::{RenderItemSnapshot, Renderer};
-use crate::rift::{RiftBackend, RiftBackendKind, RiftSubscription};
+use crate::rift::{RiftBackend, RiftBackendKind};
 
 const EVENT_TICK_MS: u64 = 16;
 const POLL_TICK_MS: u64 = 250;
@@ -84,12 +84,9 @@ enum Purpose {
     /// The first render, before the daemon reports readiness.
     Startup,
     /// A refresh of scheduled items that are due.
-    Scheduled { epoch: u64, item_ids: Vec<String> },
+    Scheduled { epoch: u64 },
     /// A refresh of one item after an event; `reply` answers a trigger request.
-    Event {
-        epoch: u64,
-        reply: Option<oneshot::Sender<Response>>,
-    },
+    Event { epoch: u64, reply: EventReply },
     /// The complete snapshot set of the staged reload with `ticket`.
     Reload { ticket: u64 },
 }
@@ -114,7 +111,6 @@ struct DaemonState<R: Renderer> {
     /// Runs the Lua calls of the current config and owns the config epoch.
     lua: LuaDispatch<EventReply>,
     backend: RiftBackendKind,
-    rift_subscription: Option<RiftSubscription>,
     /// The renderer and the items that it shows; `dump-state` reads them.
     bar: Bar<R>,
     refresh_deadlines: HashMap<String, Instant>,
@@ -134,15 +130,14 @@ impl<R: Renderer> Daemon<R> {
         renderer: R,
         rift_backend: Arc<dyn RiftBackend>,
     ) -> Result<Self, BarrsError> {
-        let producer = SnapshotProducer::new(rift_backend);
+        let mut producer = SnapshotProducer::new(rift_backend);
         let backend = producer.backend_kind();
-        let rift_subscription = producer.subscribe(&config);
+        producer.watch(&config);
         let state = DaemonState {
             refresh_deadlines: build_refresh_deadlines(&config, Instant::now(), backend),
             config,
             lua: LuaDispatch::new(lua),
             backend,
-            rift_subscription,
             bar: Bar::new(renderer),
         };
         Ok(Self {
@@ -314,22 +309,23 @@ impl<R: Renderer> Daemon<R> {
         config: Config,
         lua: LuaExecutor,
         backend: RiftBackendKind,
-        production: (Vec<ProducedItem>, RiftUse),
+        items: Vec<ProducedItem>,
+        rift: RiftUse,
     ) -> Result<(), BarrsError> {
-        let (items, rift) = production;
-        let next_states = items
-            .into_iter()
-            .map(|(_, snapshot)| snapshot)
-            .collect::<Result<Vec<_>, _>>()?;
+        reconcile_production(
+            &mut self.state.bar,
+            &mut self.producer,
+            &config,
+            items,
+            rift,
+        )?;
         let state = &mut self.state;
-        state.bar.reconcile(&config, next_states)?;
         state.backend = backend;
         state.config = config;
         state.lua.replace(lua);
-        let now = Instant::now();
-        state.refresh_deadlines = build_refresh_deadlines(&state.config, now, state.backend);
-        state.rift_subscription = self.producer.subscribe(&state.config);
-        self.producer.record(rift, now);
+        state.refresh_deadlines =
+            build_refresh_deadlines(&state.config, Instant::now(), state.backend);
+        self.producer.watch(&state.config);
         Ok(())
     }
 
@@ -360,7 +356,9 @@ impl<R: Renderer> Daemon<R> {
             due_item_ids(&state.refresh_deadlines, Instant::now())
                 .into_iter()
                 .partition(|item_id| {
-                    item_by_id(&state.config, item_id)
+                    state
+                        .config
+                        .item(item_id)
                         .is_some_and(|item| item.source.lua_update().is_some())
                 });
         // A due item that is still in flight keeps its deadline, so it updates
@@ -373,7 +371,6 @@ impl<R: Renderer> Daemon<R> {
         self.refresh_in_flight = true;
         let purpose = Purpose::Scheduled {
             epoch: state.lua.epoch(),
-            item_ids: due_items.clone(),
         };
         self.producer.request(&state.config, &due_items, purpose);
     }
@@ -407,13 +404,7 @@ impl<R: Renderer> Daemon<R> {
     /// Renders the content of one Lua update function call.
     fn show_update(&mut self, item_id: &str, content: ItemContent) -> Result<(), BarrsError> {
         let state = &mut self.state;
-        let Some((order, item)) = state
-            .config
-            .items
-            .iter()
-            .enumerate()
-            .find(|(_, item)| item.id == item_id)
-        else {
+        let Some((order, item)) = state.config.item_with_order(item_id) else {
             return Ok(());
         };
         advance_refresh_deadlines(
@@ -437,27 +428,26 @@ impl<R: Renderer> Daemon<R> {
         };
         let (purpose, items, rift) = production.into_parts();
         match purpose {
-            Purpose::Startup => {
-                let snapshots = items
-                    .into_iter()
-                    .map(|(_, snapshot)| snapshot)
-                    .collect::<Result<Vec<_>, _>>()?;
-                let state = &mut self.state;
-                state.bar.reconcile(&state.config, snapshots)?;
-                self.producer.record(rift, Instant::now());
-                Ok(())
-            }
-            Purpose::Scheduled { epoch, item_ids } => {
+            Purpose::Startup => reconcile_production(
+                &mut self.state.bar,
+                &mut self.producer,
+                &self.state.config,
+                items,
+                rift,
+            ),
+            Purpose::Scheduled { epoch } => {
                 self.refresh_in_flight = false;
                 if !refresh_epoch_matches(self.state.lua.epoch(), epoch) {
                     return Ok(());
                 }
                 let state = &mut self.state;
+                let mut item_ids = Vec::with_capacity(items.len());
                 for (item_id, snapshot) in items {
                     match snapshot {
                         Ok(snapshot) => state.bar.show(snapshot)?,
                         Err(error) => eprintln!("barrs: snapshot for {item_id} failed: {error}"),
                     }
+                    item_ids.push(item_id);
                 }
                 let now = Instant::now();
                 advance_refresh_deadlines(
@@ -490,7 +480,7 @@ impl<R: Renderer> Daemon<R> {
                     return Ok(());
                 };
                 let result =
-                    self.commit_reload(staged.config, staged.lua, staged.backend, (items, rift));
+                    self.commit_reload(staged.config, staged.lua, staged.backend, items, rift);
                 send_reply(
                     staged.reply,
                     result.map(|()| Response::Ok {
@@ -523,15 +513,8 @@ impl<R: Renderer> Daemon<R> {
     }
 
     fn process_rift_events(&mut self, now: Instant) -> Result<(), BarrsError> {
-        let events = self
-            .state
-            .rift_subscription
-            .as_ref()
-            .map(RiftSubscription::drain)
-            .unwrap_or_default();
-        self.producer.on_rift_events(&events, now);
         let state = &mut self.state;
-        for snapshot in self.producer.due_rift_renders(&state.config, now)? {
+        for snapshot in self.producer.poll_rift(&state.config, now)? {
             state.bar.show(snapshot)?;
         }
         Ok(())
@@ -544,7 +527,7 @@ impl<R: Renderer> Daemon<R> {
     /// [`Self::apply_dispatched`], which answers `reply`.
     fn deliver_event(&mut self, payload: &EventPayload, reply: EventReply) {
         let state = &mut self.state;
-        let Some(item) = item_by_id(&state.config, &payload.item_id) else {
+        let Some(item) = state.config.item(&payload.item_id) else {
             let error = BarrsError::InvalidConfig(format!("unknown item {}", payload.item_id));
             answer_event(reply, Err(error));
             return;
@@ -695,7 +678,7 @@ fn advance_refresh_deadlines(
     now: Instant,
 ) {
     for item_id in item_ids {
-        if let Some(item) = config.items.iter().find(|item| item.id == *item_id)
+        if let Some(item) = config.item(item_id)
             && let Some(refresh_interval) = item_refresh_interval(item, backend)
             && let Some(deadline) = now.checked_add(refresh_interval)
         {
@@ -710,8 +693,22 @@ fn item_refresh_interval(item: &ItemConfig, backend: RiftBackendKind) -> Option<
         .or_else(|| item.source.default_interval(backend))
 }
 
-fn item_by_id<'a>(config: &'a Config, item_id: &str) -> Option<&'a ItemConfig> {
-    config.items.iter().find(|item| item.id == item_id)
+/// Reconciles the bar to a complete production, then records the Rift data
+/// that it read.
+fn reconcile_production<R: Renderer>(
+    bar: &mut Bar<R>,
+    producer: &mut SnapshotProducer<Purpose>,
+    config: &Config,
+    items: Vec<ProducedItem>,
+    rift: RiftUse,
+) -> Result<(), BarrsError> {
+    let snapshots = items
+        .into_iter()
+        .map(|(_, snapshot)| snapshot)
+        .collect::<Result<Vec<_>, _>>()?;
+    bar.reconcile(config, snapshots)?;
+    producer.record(rift, Instant::now());
+    Ok(())
 }
 
 #[cfg(test)]
@@ -990,7 +987,6 @@ return {{
                     name: name.into(),
                     is_current: name == current_workspace,
                     window_count: 1,
-                    has_windows: true,
                 })
                 .collect(),
             layout: "tiling".into(),

@@ -51,7 +51,11 @@ impl<R: Renderer> Bar<R> {
     /// Returns the renderer error; the shown item does not change.
     pub fn show(&mut self, snapshot: RenderItemSnapshot) -> Result<(), BarrsError> {
         self.renderer.render_item(&snapshot)?;
-        self.items.insert(snapshot.id.clone(), snapshot);
+        if let Some(shown) = self.items.get_mut(&snapshot.id) {
+            *shown = snapshot;
+        } else {
+            self.items.insert(snapshot.id.clone(), snapshot);
+        }
         Ok(())
     }
 

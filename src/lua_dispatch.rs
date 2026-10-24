@@ -145,9 +145,7 @@ impl<T: Send + 'static> LuaDispatch<T> {
                 continue;
             }
             let Some(function) = config
-                .items
-                .iter()
-                .find(|item| item.id == *item_id)
+                .item(item_id)
                 .and_then(|item| item.source.lua_update())
             else {
                 continue;
