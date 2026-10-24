@@ -217,15 +217,17 @@ pub struct InteractiveSnapshot {
 }
 
 impl InteractiveSnapshot {
-    const fn from_handlers(item: &ItemConfig) -> Self {
+    fn from_handlers(item: &ItemConfig) -> Self {
+        let handles = |event| item.handlers.get(event).is_some();
         Self {
-            click: item.handlers.click.is_some(),
-            right_click: item.handlers.right_click.is_some(),
-            scroll: item.handlers.scroll.is_some(),
+            click: handles(EventKind::Click),
+            right_click: handles(EventKind::RightClick),
+            scroll: handles(EventKind::Scroll),
             hover: item.hover.is_some()
-                || item.handlers.hover_enter.is_some()
-                || item.handlers.hover_leave.is_some()
-                || item.handlers.hover_update.is_some(),
+                || EventKind::ALL
+                    .into_iter()
+                    .filter(|event| event.is_hover())
+                    .any(handles),
         }
     }
 }

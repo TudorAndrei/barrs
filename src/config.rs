@@ -5,7 +5,7 @@ use mlua::{Function, Lua, LuaSerdeExt, Value};
 use serde::{Deserialize, Serialize};
 
 use crate::error::BarrsError;
-use crate::ipc::default_socket_path;
+use crate::ipc::{EventKind, default_socket_path};
 use crate::source::ItemSource;
 
 /// Validated configuration in which every item has a typed [`ItemSource`].
@@ -215,6 +215,8 @@ pub struct HoverConfig {
     pub detail: Option<String>,
 }
 
+/// The handler slots of one item. Each field is named after the
+/// [`EventKind`] it receives; [`Self::get`] maps one to the other.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ItemHandlers {
     #[serde(default)]
@@ -304,7 +306,7 @@ fn validate_handlers(lua: &Lua, config: &Config) -> Result<(), BarrsError> {
     for item in &config.items {
         for handler in item.handlers.names() {
             globals
-                .get::<Function>(handler.as_str())
+                .get::<Function>(handler)
                 .map_err(|_| BarrsError::InvalidConfig(format!("missing handler {handler}")))?;
         }
         if let Some(update) = item.source.lua_update() {
@@ -317,17 +319,24 @@ fn validate_handlers(lua: &Lua, config: &Config) -> Result<(), BarrsError> {
 }
 
 impl ItemHandlers {
-    pub fn names(&self) -> impl Iterator<Item = &String> {
-        [
-            self.click.as_ref(),
-            self.right_click.as_ref(),
-            self.scroll.as_ref(),
-            self.hover_enter.as_ref(),
-            self.hover_leave.as_ref(),
-            self.hover_update.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
+    /// The global Lua function in the handler slot for `event`.
+    #[must_use]
+    pub fn get(&self, event: EventKind) -> Option<&str> {
+        match event {
+            EventKind::Click => self.click.as_deref(),
+            EventKind::RightClick => self.right_click.as_deref(),
+            EventKind::Scroll => self.scroll.as_deref(),
+            EventKind::HoverEnter => self.hover_enter.as_deref(),
+            EventKind::HoverLeave => self.hover_leave.as_deref(),
+            EventKind::HoverUpdate => self.hover_update.as_deref(),
+        }
+    }
+
+    /// The configured handler function names, in handler-slot order.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        EventKind::ALL
+            .into_iter()
+            .filter_map(|event| self.get(event))
     }
 }
 
