@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [0.3.1](https://github.com/TudorAndrei/barrs/releases/tag/v0.3.1) - 2026-10-24
+
+### Bug Fixes
+
+- (**render**) close the bar window when the display changes - ([fa1da40](https://github.com/TudorAndrei/barrs/commit/fa1da40eb57036c0ba74495421694ec7ef3b9b6f)) - TudorAndrei
+- (**render**) drain autoreleased AppKit objects on each host call - ([129ab34](https://github.com/TudorAndrei/barrs/commit/129ab34d537165cec2a29fc4db608d222e5bd766)) - TudorAndrei
+
+### Performance Improvements
+
+- (**daemon**) wake only for input, Rift events, and due debounces - ([785bc8d](https://github.com/TudorAndrei/barrs/commit/785bc8d03a793acece5b7e0d56e37cd59c6fb3e6)) - TudorAndrei
+- (**plugin**) read GPU and battery through IOKit instead of subprocesses - ([f820b7c](https://github.com/TudorAndrei/barrs/commit/f820b7c6d388b52e57014d3258e7210c3a5f89d8)) - TudorAndrei
+- (**plugin**) read CPU load ticks instead of running top - ([ba57179](https://github.com/TudorAndrei/barrs/commit/ba57179bc1a777feaf3602ec3ccd5d196842ee03)) - TudorAndrei
+- (**render**) send hover updates only when the pointer moves - ([e31e6cf](https://github.com/TudorAndrei/barrs/commit/e31e6cf046c2e85e255de4583f57456081da9737)) - TudorAndrei
+- (**render**) look up the bar screen only after a display reconfiguration - ([7ecfad8](https://github.com/TudorAndrei/barrs/commit/7ecfad8ce5a87eb87c5e0966c7b071245ebe4d1d)) - TudorAndrei
+- (**render**) lay out a reconciled item set once - ([6af6779](https://github.com/TudorAndrei/barrs/commit/6af6779cd401b72f40f2afb91300e7ea923e6c79)) - TudorAndrei
+
+### Documentation
+
+- (**plan**) record completed simplification checks - ([108af08](https://github.com/TudorAndrei/barrs/commit/108af085c05826a8e44702a3b7f179b596d95899)) - TudorAndrei
+
+### Refactoring
+
+- (**config**) derive handler slots from the event kind - ([d08083c](https://github.com/TudorAndrei/barrs/commit/d08083c243f6dc7186275ae6d91a04f1615df961)) - TudorAndrei
+- (**content**) pass typed item content from producers to render - ([e15d598](https://github.com/TudorAndrei/barrs/commit/e15d5985fe0cc64fc2518198ccc65a53e2299003)) - TudorAndrei
+- (**daemon**) let the producer own the Rift subscription - ([05050f6](https://github.com/TudorAndrei/barrs/commit/05050f6ae2bc71d4cd3b28d0a923601226b4d335)) - TudorAndrei
+- (**daemon**) show items through a bar that owns the shown snapshots - ([66d12eb](https://github.com/TudorAndrei/barrs/commit/66d12eba2d482c01d2764e757114023494267296)) - TudorAndrei
+- ![BREAKING](https://img.shields.io/badge/BREAKING-red) (**daemon**) produce snapshots off the event loop with an injected Rift backend - ([39bad61](https://github.com/TudorAndrei/barrs/commit/39bad61df5b0672832e0fdd45c639417cc327777)) - TudorAndrei
+- (**daemon**) own daemon state directly - ([38b8b87](https://github.com/TudorAndrei/barrs/commit/38b8b87aa8ceee45f4247253cf547ddc7ed86dff)) - TudorAndrei
+- ![BREAKING](https://img.shields.io/badge/BREAKING-red) (**lua**) dispatch Lua item calls without blocking the event loop - ([af0c7af](https://github.com/TudorAndrei/barrs/commit/af0c7aff03702c58b540ce2e138a48893ff3a738)) - TudorAndrei
+- ![BREAKING](https://img.shields.io/badge/BREAKING-red) (**plugin**) return built-in snapshot data directly - ([5a2482a](https://github.com/TudorAndrei/barrs/commit/5a2482a35ec4bb6adbb3ed5c898fb593859195af)) - TudorAndrei
+- ![BREAKING](https://img.shields.io/badge/BREAKING-red) (**render**) require a transactional reconcile and drop initialize - ([088312d](https://github.com/TudorAndrei/barrs/commit/088312d2366694874b2cc83effcb6d1579b77c35)) - TudorAndrei
+- (**rift**) track the Rift snapshot and debounce in a Rift tracker - ([9725676](https://github.com/TudorAndrei/barrs/commit/97256767c799cdf8f5d5396d8defe87b2501eb74)) - TudorAndrei
+- ![BREAKING](https://img.shields.io/badge/BREAKING-red) (**source**) give each item a typed item source - ([d781095](https://github.com/TudorAndrei/barrs/commit/d781095a055809aa3a2d195f3476150f85225412)) - TudorAndrei
+
+- - -
+
 ## [0.3.0](https://github.com/TudorAndrei/barrs/releases/tag/v0.3.0) - 2026-10-11
 
 ### Features
