@@ -751,10 +751,23 @@ impl NativeHost for AppKitHost {
         _bar_height: f64,
     ) -> Result<LayoutGeometry, BarrsError> {
         let mtm = main_thread_marker()?;
-        Ok(bar_screen_layout_geometry(config, mtm))
+        Ok(objc2::rc::autoreleasepool(|_| {
+            bar_screen_layout_geometry(config, mtm)
+        }))
     }
 
     fn present(&mut self, scene: &BarScene) -> Result<(), BarrsError> {
+        objc2::rc::autoreleasepool(|_| self.present_in_pool(scene))
+    }
+
+    fn drain_events(&mut self) -> Result<Vec<EventPayload>, BarrsError> {
+        objc2::rc::autoreleasepool(|_| self.drain_events_in_pool())
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl AppKitHost {
+    fn present_in_pool(&mut self, scene: &BarScene) -> Result<(), BarrsError> {
         self.prepare_for_target_display()?;
         let next_plan = host_scene_plan(scene);
         let commands = diff_host_scene(self.last_plan.as_ref(), &next_plan);
@@ -766,7 +779,7 @@ impl NativeHost for AppKitHost {
         Ok(())
     }
 
-    fn drain_events(&mut self) -> Result<Vec<EventPayload>, BarrsError> {
+    fn drain_events_in_pool(&mut self) -> Result<Vec<EventPayload>, BarrsError> {
         self.pump_events();
         let hover_events = self.poll_hover_payloads();
         self.pending_events.extend(hover_events);
@@ -778,7 +791,7 @@ impl NativeHost for AppKitHost {
                 self.invalidate_native_window("display-reconfiguration-rebuild");
             }
             if let Some(scene) = self.last_scene.clone() {
-                self.present(&scene)?;
+                self.present_in_pool(&scene)?;
             }
         }
         Ok(std::mem::take(&mut self.pending_events))
