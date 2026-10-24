@@ -42,7 +42,17 @@ epoch or a superseded reload. A reload stages the loaded config and replaces
 the current one only when its complete snapshot set is ready and the renderer
 reconciles it; the reload reply waits for that. Startup applies its snapshots
 before the daemon reports readiness. Lua updates run on the Lua
-executor and always return text content, or fail to unavailable content. The
+executor and always return text content, or fail to unavailable content.
+Lua item dispatch, `src/lua_dispatch.rs#struct:LuaDispatch`, is the daemon's
+only path to the executor and owns the config epoch. It queues an event's
+handler, or an item's update, without waiting, and returns each finished call
+to the event loop as a message. The handler slot for an event is the event
+kind itself (`src/ipc.rs#enum:EventKind`); config validation, the dispatch, and
+the renderer's interactive flags all read it through
+`src/config.rs#fn:get`. Dispatch keeps at most one update per item in flight,
+runs the update after a click, right click, or scroll handler, and discards
+update results of an older config epoch. An item trigger request answers when
+its handler ends, or when the new snapshot of a non-Lua item is shown. The
 native renderer is macOS/AppKit-specific and is intentionally current-thread
 only; the noop renderer supports tests and non-visual operation.
 
@@ -92,6 +102,8 @@ bounded child-process execution for platform queries and the CLI fallback.
 - Lua configuration schema and validation: `src/config.rs`
 - Daemon lifecycle, scheduler, reload, and replies: `src/daemon.rs`
 - Snapshot production off the event loop: `src/producer.rs`
+- Lua item dispatch over the executor: `src/lua_dispatch.rs`
+- Lua runtime thread of one config generation: `src/lua_executor.rs`
 - Framed Unix-socket protocol: `src/ipc.rs`
 - Item sources and their refresh policy: `src/source.rs`
 - Built-in system and Rift snapshot data: `src/plugin.rs`

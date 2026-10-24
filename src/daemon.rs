@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{ErrorKind, Write};
@@ -17,7 +17,8 @@ use crate::error::BarrsError;
 use crate::ipc::{
     EventPayload, Request, Response, read_request_frame, send_request, write_response,
 };
-use crate::lua_executor::{LuaExecutor, UpdateResult};
+use crate::lua_dispatch::{Dispatched, LuaDispatch};
+use crate::lua_executor::LuaExecutor;
 use crate::producer::{Completion, ProducedItem, RiftUse, SnapshotProducer};
 use crate::render::{RenderItemSnapshot, Renderer};
 use crate::rift::{RiftBackend, RiftBackendKind, RiftSubscription};
@@ -38,9 +39,11 @@ pub struct Daemon<R: Renderer> {
     /// current one.
     staged_reload: Option<StagedReload>,
     reload_ticket: u64,
-    update_sender: mpsc::UnboundedSender<UpdateResult>,
-    update_receiver: mpsc::UnboundedReceiver<UpdateResult>,
 }
+
+/// Answers the item trigger request that delivered an event; renderer events
+/// have none.
+type EventReply = Option<oneshot::Sender<Response>>;
 
 async fn serve_connection(mut stream: UnixStream, sender: mpsc::Sender<IncomingRequest>) {
     let request = match read_request_frame(&mut stream).await {
@@ -107,15 +110,13 @@ struct IncomingRequest {
 
 struct DaemonState<R: Renderer> {
     config: Config,
-    config_epoch: u64,
-    lua: LuaExecutor,
+    /// Runs the Lua calls of the current config and owns the config epoch.
+    lua: LuaDispatch<EventReply>,
     backend: RiftBackendKind,
     rift_subscription: Option<RiftSubscription>,
     renderer: R,
     item_states: HashMap<String, RenderItemSnapshot>,
     refresh_deadlines: HashMap<String, Instant>,
-    /// Lua items whose update function is queued or running on the executor.
-    updates_in_flight: HashSet<String>,
 }
 
 impl<R: Renderer> Daemon<R> {
@@ -138,15 +139,12 @@ impl<R: Renderer> Daemon<R> {
         let state = DaemonState {
             refresh_deadlines: build_refresh_deadlines(&config, Instant::now(), backend),
             config,
-            config_epoch: 0,
-            lua,
+            lua: LuaDispatch::new(lua),
             backend,
             rift_subscription,
             renderer,
             item_states: HashMap::new(),
-            updates_in_flight: HashSet::new(),
         };
-        let (update_sender, update_receiver) = mpsc::unbounded_channel();
         Ok(Self {
             config_path,
             state,
@@ -154,8 +152,6 @@ impl<R: Renderer> Daemon<R> {
             refresh_in_flight: false,
             staged_reload: None,
             reload_ticket: 0,
-            update_sender,
-            update_receiver,
         })
     }
 
@@ -198,9 +194,9 @@ impl<R: Renderer> Daemon<R> {
                     }
                 }
                 Some(_) = connections.join_next(), if !connections.is_empty() => {}
-                Some(update) = self.update_receiver.recv() => {
-                    if let Err(error) = self.apply_update(update) {
-                        eprintln!("barrs: applying lua update failed: {error}");
+                dispatched = self.state.lua.next() => {
+                    if let Err(error) = self.apply_dispatched(dispatched) {
+                        eprintln!("barrs: applying lua result failed: {error}");
                     }
                 }
                 accept_result = listener.accept() => {
@@ -217,13 +213,13 @@ impl<R: Renderer> Daemon<R> {
                         continue;
                     };
                     let stop = matches!(incoming.request, Request::Stop);
-                    self.handle_request(incoming.request, incoming.response).await;
+                    self.handle_request(incoming.request, incoming.response);
                     if stop {
                         break;
                     }
                 }
                 _ = event_tick.tick() => {
-                    if let Err(error) = self.process_renderer_events().await {
+                    if let Err(error) = self.process_renderer_events() {
                         eprintln!("barrs: renderer event processing failed: {error}");
                     }
                     if let Err(error) = self.process_rift_events(Instant::now()) {
@@ -249,9 +245,10 @@ impl<R: Renderer> Daemon<R> {
 
     /// Answers one IPC request through `reply`.
     ///
-    /// A reload or an item trigger that needs new snapshots answers when the
-    /// snapshots are applied.
-    async fn handle_request(&mut self, request: Request, reply: oneshot::Sender<Response>) {
+    /// A reload answers when its snapshots are applied; an item trigger
+    /// answers when its handler ends, or when the item's new snapshot is
+    /// shown.
+    fn handle_request(&mut self, request: Request, reply: oneshot::Sender<Response>) {
         let response = match request {
             Request::Ping => Ok(Response::Pong),
             Request::Stop => Ok(Response::Ok {
@@ -278,12 +275,7 @@ impl<R: Renderer> Daemon<R> {
                 backend: self.state.backend,
             }),
             Request::TriggerItem { payload } => {
-                let mut reply = Some(reply);
-                let result = self.dispatch_event(payload, &mut reply).await;
-                // A requested refresh took the reply and answers it later.
-                if let Some(reply) = reply {
-                    send_reply(reply, result.map(|()| event_delivered()));
-                }
+                self.deliver_event(&payload, Some(reply));
                 return;
             }
         };
@@ -331,11 +323,9 @@ impl<R: Renderer> Daemon<R> {
             .collect::<Result<Vec<_>, _>>()?;
         let state = &mut self.state;
         state.renderer.reconcile(&config, &next_states)?;
-        state.config_epoch = state.config_epoch.wrapping_add(1);
         state.backend = backend;
         state.config = config;
-        state.lua = lua;
-        state.updates_in_flight.clear();
+        state.lua.replace(lua);
         let now = Instant::now();
         state.refresh_deadlines = build_refresh_deadlines(&state.config, now, state.backend);
         state.rift_subscription = self.producer.subscribe(&state.config);
@@ -366,91 +356,77 @@ impl<R: Renderer> Daemon<R> {
     }
 
     fn refresh_due_items(&mut self) {
-        let now = Instant::now();
+        let state = &mut self.state;
         let (lua_items, due_items): (Vec<String>, Vec<String>) =
-            due_item_ids(&self.state.refresh_deadlines, now)
+            due_item_ids(&state.refresh_deadlines, Instant::now())
                 .into_iter()
                 .partition(|item_id| {
-                    item_by_id(&self.state.config, item_id)
+                    item_by_id(&state.config, item_id)
                         .is_some_and(|item| item.source.lua_update().is_some())
                 });
-        self.request_lua_updates(&lua_items);
+        // A due item that is still in flight keeps its deadline, so it updates
+        // once more after the running call ends and its interval passes.
+        state.lua.request_updates(&state.config, &lua_items);
 
         if !can_start_refresh(self.refresh_in_flight, &due_items) {
             return;
         }
         self.refresh_in_flight = true;
         let purpose = Purpose::Scheduled {
-            epoch: self.state.config_epoch,
+            epoch: state.lua.epoch(),
             item_ids: due_items.clone(),
         };
-        self.producer
-            .request(&self.state.config, &due_items, purpose);
+        self.producer.request(&state.config, &due_items, purpose);
     }
 
-    /// Queues the update functions of due Lua items that are not already in flight.
-    ///
-    /// A due item that is still in flight keeps its deadline, so the daemon
-    /// requests it once more after the running call ends and its interval passes.
-    fn request_lua_updates(&mut self, due_items: &[String]) {
-        let state = &mut self.state;
-        let requested: Vec<&String> =
-            updates_to_request(due_items, &state.updates_in_flight).collect();
-        for item_id in requested {
-            let Some(function) =
-                item_by_id(&state.config, item_id).and_then(|item| item.source.lua_update())
-            else {
-                continue;
-            };
-            match state.lua.request_update(
-                state.config_epoch,
+    /// Applies a finished Lua call: answers the event that a handler
+    /// processed, or renders the content that an update function produced.
+    fn apply_dispatched(&mut self, dispatched: Dispatched<EventReply>) -> Result<(), BarrsError> {
+        match dispatched {
+            Dispatched::Handled {
+                tag: reply,
                 item_id,
-                function,
-                &self.update_sender,
-            ) {
-                Ok(()) => {
-                    state.updates_in_flight.insert(item_id.clone());
+                result,
+                refresh,
+            } => {
+                if refresh {
+                    let purpose = Purpose::Event {
+                        epoch: self.state.lua.epoch(),
+                        reply,
+                    };
+                    self.producer
+                        .request(&self.state.config, &[item_id], purpose);
+                } else {
+                    answer_event(reply, result);
                 }
-                Err(error) => eprintln!("barrs: lua update for {item_id} failed: {error}"),
+                Ok(())
             }
+            Dispatched::Updated { item_id, content } => self.show_update(item_id, content),
         }
     }
 
-    /// Renders the result of one Lua update function call.
-    ///
-    /// Results from an older config generation are discarded. A failed call
-    /// shows the unavailable placeholder.
-    fn apply_update(&mut self, update: UpdateResult) -> Result<(), BarrsError> {
+    /// Renders the content of one Lua update function call.
+    fn show_update(&mut self, item_id: String, content: ItemContent) -> Result<(), BarrsError> {
         let state = &mut self.state;
-        if !refresh_epoch_matches(state.config_epoch, update.epoch) {
-            return Ok(());
-        }
-        state.updates_in_flight.remove(&update.item_id);
         let Some((order, item)) = state
             .config
             .items
             .iter()
             .enumerate()
-            .find(|(_, item)| item.id == update.item_id)
+            .find(|(_, item)| item.id == item_id)
         else {
             return Ok(());
         };
-        let content = update.outcome.unwrap_or_else(|error| {
-            eprintln!("barrs: lua update for {} failed: {error}", update.item_id);
-            ItemContent::Unavailable
-        });
         let snapshot = RenderItemSnapshot::from_item_config(item, order, content);
-        let now = Instant::now();
         advance_refresh_deadlines(
             &mut state.refresh_deadlines,
             &state.config,
             state.backend,
-            std::slice::from_ref(&update.item_id),
-            now,
+            std::slice::from_ref(&item_id),
+            Instant::now(),
         );
         state.renderer.render_item(&snapshot)?;
-        state.item_states.insert(update.item_id, snapshot);
-
+        state.item_states.insert(item_id, snapshot);
         Ok(())
     }
 
@@ -477,7 +453,7 @@ impl<R: Renderer> Daemon<R> {
             }
             Purpose::Scheduled { epoch, item_ids } => {
                 self.refresh_in_flight = false;
-                if !refresh_epoch_matches(self.state.config_epoch, epoch) {
+                if !refresh_epoch_matches(self.state.lua.epoch(), epoch) {
                     return Ok(());
                 }
                 let state = &mut self.state;
@@ -502,7 +478,7 @@ impl<R: Renderer> Daemon<R> {
                 Ok(())
             }
             Purpose::Event { epoch, reply } => {
-                let result = if refresh_epoch_matches(self.state.config_epoch, epoch) {
+                let result = if refresh_epoch_matches(self.state.lua.epoch(), epoch) {
                     self.show_event_items(items, rift)
                 } else {
                     Ok(())
@@ -548,10 +524,9 @@ impl<R: Renderer> Daemon<R> {
         Ok(())
     }
 
-    async fn process_renderer_events(&mut self) -> Result<(), BarrsError> {
-        let events = self.state.renderer.drain_events()?;
-        for event in events {
-            self.dispatch_event(event, &mut None).await?;
+    fn process_renderer_events(&mut self) -> Result<(), BarrsError> {
+        for event in self.state.renderer.drain_events()? {
+            self.deliver_event(&event, None);
         }
         Ok(())
     }
@@ -572,47 +547,36 @@ impl<R: Renderer> Daemon<R> {
         Ok(())
     }
 
-    /// Delivers an item event to its Lua handler and the renderer, then
-    /// refreshes the item after a click or scroll.
+    /// Delivers an item event to the renderer and queues its Lua handler.
     ///
-    /// A refresh of a non-Lua item takes `reply` and answers it when the new
-    /// snapshot is shown.
-    async fn dispatch_event(
-        &mut self,
-        payload: EventPayload,
-        reply: &mut Option<oneshot::Sender<Response>>,
-    ) -> Result<(), BarrsError> {
+    /// Nothing here waits for Lua. The handler result, and the item refresh
+    /// that a click or scroll asks for, come back through
+    /// [`Self::apply_dispatched`], which answers `reply`.
+    fn deliver_event(&mut self, payload: &EventPayload, reply: EventReply) {
         let state = &mut self.state;
-        let item = item_by_id(&state.config, &payload.item_id).ok_or_else(|| {
-            BarrsError::InvalidConfig(format!("unknown item {}", payload.item_id))
-        })?;
-
-        invoke_lua_handler(&state.lua, item, &payload).await?;
-        state.renderer.handle_event(&payload)?;
-
-        if matches!(
-            payload.event,
-            crate::ipc::EventKind::HoverEnter
-                | crate::ipc::EventKind::HoverLeave
-                | crate::ipc::EventKind::HoverUpdate
-        ) {
-            return Ok(());
-        }
-        if item.source.lua_update().is_some() {
-            // A handler can change the state an update function reads, so update at once.
-            state
-                .refresh_deadlines
-                .insert(item.id.clone(), Instant::now());
-            return Ok(());
-        }
-        let item_ids = [item.id.clone()];
-        let purpose = Purpose::Event {
-            epoch: state.config_epoch,
-            reply: reply.take(),
+        let Some(item) = item_by_id(&state.config, &payload.item_id) else {
+            let error = BarrsError::InvalidConfig(format!("unknown item {}", payload.item_id));
+            answer_event(reply, Err(error));
+            return;
         };
-        self.producer
-            .request(&self.state.config, &item_ids, purpose);
-        Ok(())
+        if let Err(error) = state.renderer.handle_event(payload) {
+            answer_event(reply, Err(error));
+            return;
+        }
+        state.lua.deliver(item, payload, reply);
+    }
+}
+
+/// Answers the request that delivered an event, or logs an event error when
+/// no request waits.
+fn answer_event(reply: EventReply, result: Result<(), BarrsError>) {
+    match reply {
+        Some(reply) => send_reply(reply, result.map(|()| event_delivered())),
+        None => {
+            if let Err(error) = result {
+                eprintln!("barrs: event handling failed: {error}");
+            }
+        }
     }
 }
 
@@ -767,35 +731,6 @@ fn item_by_id<'a>(config: &'a Config, item_id: &str) -> Option<&'a ItemConfig> {
     config.items.iter().find(|item| item.id == item_id)
 }
 
-fn updates_to_request<'a>(
-    due_items: &'a [String],
-    in_flight: &HashSet<String>,
-) -> impl Iterator<Item = &'a String> {
-    due_items
-        .iter()
-        .filter(|item_id| !in_flight.contains(*item_id))
-}
-
-async fn invoke_lua_handler(
-    lua: &LuaExecutor,
-    item: &ItemConfig,
-    payload: &EventPayload,
-) -> Result<(), BarrsError> {
-    let handler_name = match payload.event {
-        crate::ipc::EventKind::Click => item.handlers.click.as_ref(),
-        crate::ipc::EventKind::RightClick => item.handlers.right_click.as_ref(),
-        crate::ipc::EventKind::Scroll => item.handlers.scroll.as_ref(),
-        crate::ipc::EventKind::HoverEnter => item.handlers.hover_enter.as_ref(),
-        crate::ipc::EventKind::HoverLeave => item.handlers.hover_leave.as_ref(),
-        crate::ipc::EventKind::HoverUpdate => item.handlers.hover_update.as_ref(),
-    };
-    let Some(handler_name) = handler_name else {
-        return Ok(());
-    };
-    lua.call_handler(handler_name, serde_json::to_value(payload)?)
-        .await
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -867,12 +802,20 @@ mod tests {
         }
     }
 
-    /// Delivers an event as the renderer would, with no request to answer.
-    async fn dispatch<R: Renderer>(
-        daemon: &mut Daemon<R>,
-        payload: crate::ipc::EventPayload,
-    ) -> Result<(), crate::error::BarrsError> {
-        daemon.dispatch_event(payload, &mut None).await
+    /// Delivers an event as the renderer would, with no request to answer,
+    /// and applies finished Lua calls until its handler ends.
+    async fn dispatch<R: Renderer>(daemon: &mut Daemon<R>, payload: crate::ipc::EventPayload) {
+        daemon.deliver_event(&payload, None);
+        loop {
+            let dispatched = daemon.state.lua.next().await;
+            let handled = matches!(dispatched, super::Dispatched::Handled { .. });
+            daemon
+                .apply_dispatched(dispatched)
+                .expect("apply lua result");
+            if handled {
+                return;
+            }
+        }
     }
 
     /// Waits for the next finished snapshot production and applies it.
@@ -883,16 +826,23 @@ mod tests {
             .expect("apply snapshots");
     }
 
-    /// Hands `request` to the daemon and applies finished productions until
-    /// the daemon answers it.
+    /// Hands `request` to the daemon and applies finished productions and
+    /// Lua calls until the daemon answers it.
     async fn answer<R: Renderer>(daemon: &mut Daemon<R>, request: Request) -> Response {
         let (reply, mut response) = tokio::sync::oneshot::channel();
-        daemon.handle_request(request, reply).await;
+        daemon.handle_request(request, reply);
         loop {
             match response.try_recv() {
                 Ok(response) => return response,
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
-                    apply_next(daemon).await;
+                    tokio::select! {
+                        completion = daemon.producer.next() => {
+                            daemon.apply_completion(completion).expect("apply snapshots");
+                        }
+                        dispatched = daemon.state.lua.next() => {
+                            daemon.apply_dispatched(dispatched).expect("apply lua result");
+                        }
+                    }
                 }
                 Err(error) => panic!("daemon dropped the reply: {error}"),
             }
@@ -1284,7 +1234,7 @@ return {{
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn slow_lua_update_does_not_block_ipc() {
+    async fn a_trigger_behind_a_slow_lua_update_does_not_block_ipc() {
         let dir = tempdir().expect("tempdir");
         let socket_path = dir.path().join("barrs.sock");
         let config_path = dir.path().join("barrs.lua");
@@ -1301,9 +1251,13 @@ function slow(ctx)
   while os.clock() - start < 1.5 do end
   return "done"
 end
+function noop(ctx) end
 return {{
   socket_path = "{}",
-  items = {{ {{ id = "slow", interval = 3600, plugin = {{ kind = "lua", update = "slow" }} }} }}
+  items = {{
+    {{ id = "slow", interval = 3600, plugin = {{ kind = "lua", update = "slow" }} }},
+    {{ id = "button", label = "button", handlers = {{ click = "noop" }} }},
+  }}
 }}
 "#,
                 started_path.display(),
@@ -1324,32 +1278,47 @@ return {{
         }
         assert!(started_path.exists(), "update function never started");
 
+        // The click handler waits on the Lua thread behind the slow update.
+        let trigger_socket = socket_path.clone();
+        let trigger = tokio::spawn(async move {
+            send_request(
+                &trigger_socket,
+                &Request::TriggerItem {
+                    payload: crate::ipc::EventPayload::from_trigger(
+                        "button".into(),
+                        crate::cli::TriggerEvent::Click,
+                    ),
+                },
+            )
+            .await
+        });
+        // Let the daemon receive the trigger before the other requests.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
         let started = std::time::Instant::now();
         let response = send_request(&socket_path, &Request::Ping)
             .await
             .expect("ping");
         assert!(matches!(response, Response::Pong));
+        let status = send_request(&socket_path, &Request::Status)
+            .await
+            .expect("status");
+        assert!(matches!(status, Response::Status { items: 2, .. }));
         assert!(
             started.elapsed() < std::time::Duration::from_millis(500),
-            "ping took {:?} while an update ran",
+            "ping and status took {:?} while an update ran",
             started.elapsed()
         );
+        assert!(!trigger.is_finished(), "the trigger waits for its handler");
+
+        let response = trigger.await.expect("join").expect("trigger");
+        assert!(matches!(response, Response::Ok { .. }));
         wait_for_item_text(&socket_path, "slow", "done").await;
 
         let _ = send_request(&socket_path, &Request::Stop)
             .await
             .expect("stop");
         task.await.expect("join").expect("daemon result");
-    }
-
-    #[test]
-    fn in_flight_lua_updates_are_not_requested_again() {
-        let due = vec!["memory".to_owned(), "disk".to_owned()];
-        let in_flight = std::collections::HashSet::from(["memory".to_owned()]);
-
-        let requested: Vec<&String> = super::updates_to_request(&due, &in_flight).collect();
-
-        assert_eq!(requested, vec!["disk"]);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1755,8 +1724,7 @@ return {{
                 crate::cli::TriggerEvent::Click,
             ),
         )
-        .await
-        .expect("handler");
+        .await;
         assert_eq!(fs::read_to_string(&handler_path).expect("handler"), "1");
 
         reload(&mut daemon).await.expect("reload");
@@ -1772,8 +1740,7 @@ return {{
                 crate::cli::TriggerEvent::Click,
             ),
         )
-        .await
-        .expect("handler");
+        .await;
         assert_eq!(fs::read_to_string(&handler_path).expect("handler"), "2");
     }
 
@@ -1858,11 +1825,10 @@ return {{
             &mut daemon,
             crate::ipc::EventPayload::from_trigger("old".into(), crate::cli::TriggerEvent::Click),
         )
-        .await
-        .expect("click");
+        .await;
         write_item_config(&config_path, &socket_path, &["new"]);
         let (reply, mut response) = tokio::sync::oneshot::channel();
-        daemon.handle_request(Request::Reload, reply).await;
+        daemon.handle_request(Request::Reload, reply);
 
         // Apply the reload before the click refresh that the old config requested.
         let mut completions = vec![daemon.producer.next().await, daemon.producer.next().await];
@@ -1960,17 +1926,21 @@ return {{
         let config = load_config(&config_path).expect("config");
         let mut daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
 
-        let error = dispatch(
+        let response = answer(
             &mut daemon,
-            crate::ipc::EventPayload::from_trigger(
-                "missing".into(),
-                crate::cli::TriggerEvent::HoverEnter,
-            ),
+            Request::TriggerItem {
+                payload: crate::ipc::EventPayload::from_trigger(
+                    "missing".into(),
+                    crate::cli::TriggerEvent::HoverEnter,
+                ),
+            },
         )
-        .await
-        .expect_err("unknown item should fail");
+        .await;
 
-        assert!(error.to_string().contains("unknown item missing"));
+        let Response::Error { message } = response else {
+            panic!("unknown item should fail");
+        };
+        assert!(message.contains("unknown item missing"));
         assert!(!marker_path.exists());
     }
 
@@ -2141,8 +2111,7 @@ return {{
                 modifiers: crate::ipc::Modifiers::default(),
             },
         )
-        .await
-        .expect("hover event");
+        .await;
 
         let state = &daemon.state;
         assert_eq!(
@@ -2183,8 +2152,7 @@ return {{
                 modifiers: crate::ipc::Modifiers::default(),
             },
         )
-        .await
-        .expect("hover update");
+        .await;
 
         assert_eq!(renders.load(Ordering::SeqCst), 1);
 
@@ -2192,8 +2160,7 @@ return {{
             &mut daemon,
             crate::ipc::EventPayload::from_trigger("clock".into(), crate::cli::TriggerEvent::Click),
         )
-        .await
-        .expect("click refresh");
+        .await;
         apply_next(&mut daemon).await;
         assert_eq!(renders.load(Ordering::SeqCst), 2);
     }
@@ -2284,10 +2251,8 @@ return {{
             modifiers: crate::ipc::Modifiers::default(),
         };
 
-        dispatch(&mut daemon, event.clone())
-            .await
-            .expect("first update");
-        dispatch(&mut daemon, event).await.expect("same update");
+        dispatch(&mut daemon, event.clone()).await;
+        dispatch(&mut daemon, event).await;
 
         assert_eq!(fs::read_to_string(&marker_path).expect("marker"), "2");
     }

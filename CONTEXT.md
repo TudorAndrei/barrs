@@ -46,3 +46,13 @@ fetcher.
 **Staged reload**: a loaded config and Lua runtime that wait for their
 complete snapshot set before they replace the current ones. _Avoid_: pending
 config.
+
+**Handler slot**: the key in an item's `handlers` table that names the Lua
+function for one event kind. Each slot has the name of its event kind
+(`EventKind`), so the event kind is the slot. _Avoid_: callback, hook.
+
+**Lua item dispatch**: the daemon's module (`LuaDispatch`) that sends item
+events and update requests to the Lua executor of the current config
+generation without waiting, and returns each finished call to the event loop.
+It owns the config epoch and the in-flight updates. _Avoid_: Lua runner, Lua
+scheduler.
