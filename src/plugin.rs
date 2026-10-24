@@ -13,7 +13,7 @@ const TIME_FORMAT: &str = "%H:%M";
 
 /// Current CPU usage, or unavailable content.
 pub(crate) fn cpu() -> ItemContent {
-    cpu_snapshot_from_top().unwrap_or(ItemContent::Unavailable)
+    cpu_snapshot_from_load_ticks().unwrap_or(ItemContent::Unavailable)
 }
 
 /// Current local time.
@@ -78,40 +78,98 @@ pub(crate) fn rift_layout(rift: Option<&RiftSnapshot>) -> ItemContent {
     })
 }
 
-fn cpu_snapshot_from_top() -> Option<ItemContent> {
-    #[cfg(target_os = "macos")]
-    {
-        let output =
-            run_command_with_timeout("top", &["-l", "2", "-n", "0"], SYSTEM_QUERY_TIMEOUT)?;
-        if !output.status.success() {
-            return None;
-        }
-        parse_cpu_output(std::str::from_utf8(&output.stdout).ok()?)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
-    }
-}
-
-fn parse_cpu_output(output: &str) -> Option<ItemContent> {
-    let line = output
-        .lines()
-        .rev()
-        .find(|line| line.trim_start().starts_with("CPU usage:"))?;
-    let usage = line
-        .split(':')
-        .nth(1)?
-        .split(',')
-        .filter(|part| !part.to_ascii_lowercase().contains("idle"))
-        .filter_map(|part| part.trim().split('%').next())
-        .filter_map(|number| number.trim().parse::<f64>().ok())
-        .sum::<f64>();
+fn cpu_snapshot_from_load_ticks() -> Option<ItemContent> {
+    let usage = cpu_load::usage_percent()?;
     let rounded = usage.round();
     Some(ItemContent::plain_with_fields(
         format!("{rounded:.0}%"),
         [("usage_percent", json!(usage))],
     ))
+}
+
+/// Busy share, in percent, of the CPU ticks between two readings of the
+/// host CPU load: user, system, idle, and nice ticks, in that order.
+fn cpu_usage_between(previous: [u32; 4], current: [u32; 4]) -> Option<f64> {
+    let [user_before, system_before, idle_before, nice_before] = previous;
+    let [user_now, system_now, idle_now, nice_now] = current;
+    let user = user_now.wrapping_sub(user_before);
+    let system = system_now.wrapping_sub(system_before);
+    let idle = idle_now.wrapping_sub(idle_before);
+    let nice = nice_now.wrapping_sub(nice_before);
+    let busy = user.checked_add(system)?.checked_add(nice)?;
+    let total = busy.checked_add(idle)?;
+    (total > 0).then(|| f64::from(busy) * 100.0 / f64::from(total))
+}
+
+/// CPU usage from the host CPU load ticks. Reading the ticks is a single
+/// Mach call; it does not start a process.
+#[cfg(target_os = "macos")]
+mod cpu_load {
+    use std::mem::MaybeUninit;
+    use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+    use std::time::Duration;
+
+    /// The wait between the first two readings, when no earlier reading exists.
+    const FIRST_SAMPLE_WINDOW: Duration = Duration::from_millis(250);
+
+    static HOST: OnceLock<libc::mach_port_t> = OnceLock::new();
+    static PREVIOUS: Mutex<Option<[u32; 4]>> = Mutex::new(None);
+
+    /// CPU usage since the previous call, or over a short window on the first
+    /// call.
+    pub(super) fn usage_percent() -> Option<f64> {
+        let stored = *previous_ticks();
+        let before = if let Some(ticks) = stored {
+            ticks
+        } else {
+            let ticks = read_ticks()?;
+            std::thread::sleep(FIRST_SAMPLE_WINDOW);
+            ticks
+        };
+        let current = read_ticks()?;
+        *previous_ticks() = Some(current);
+        super::cpu_usage_between(before, current)
+    }
+
+    fn previous_ticks() -> MutexGuard<'static, Option<[u32; 4]>> {
+        PREVIOUS.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    // libc points to the `mach2` crate for `mach_host_self`; this one call does not need it.
+    #[allow(deprecated)]
+    fn host_port() -> libc::mach_port_t {
+        // SAFETY: `mach_host_self` has no preconditions. The caller keeps the port for the
+        // process lifetime, so its send right is never released.
+        unsafe { libc::mach_host_self() }
+    }
+
+    fn read_ticks() -> Option<[u32; 4]> {
+        let host = *HOST.get_or_init(host_port);
+        let mut info = MaybeUninit::<libc::host_cpu_load_info>::uninit();
+        let mut count = libc::HOST_CPU_LOAD_INFO_COUNT;
+        // SAFETY: `info` is valid for writes of one `host_cpu_load_info`, which is
+        // `count` integers, and both stay alive for the whole call.
+        let result = unsafe {
+            libc::host_statistics(
+                host,
+                libc::HOST_CPU_LOAD_INFO,
+                info.as_mut_ptr().cast(),
+                &raw mut count,
+            )
+        };
+        if result != libc::KERN_SUCCESS {
+            return None;
+        }
+        // SAFETY: `host_statistics` succeeded, so it initialized `info`.
+        Some(unsafe { info.assume_init() }.cpu_ticks)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod cpu_load {
+    pub(super) const fn usage_percent() -> Option<f64> {
+        None
+    }
 }
 
 fn format_local_time(format: &str) -> Result<String, BarrsError> {
@@ -222,7 +280,7 @@ fn parse_battery_output(output: &str) -> Option<ItemContent> {
 
 #[cfg(test)]
 mod tests {
-    use crate::plugin::{parse_battery_output, parse_cpu_output, parse_gpu_output};
+    use crate::plugin::{cpu_usage_between, parse_battery_output, parse_gpu_output};
 
     #[test]
     fn parses_battery_output() {
@@ -236,14 +294,22 @@ mod tests {
     }
 
     #[test]
-    fn parses_cpu_output() {
-        let snapshot = parse_cpu_output(
-            "CPU usage: 7.42% user, 5.09% sys, 87.48% idle\nCPU usage: 8.00% user, 4.00% sys, 88.00% idle",
-        )
-        .expect("parsed cpu output")
-        .data();
-        assert_eq!(snapshot["text"], "12%");
-        assert_eq!(snapshot["usage_percent"], 12.0);
+    fn cpu_usage_is_the_busy_share_of_the_ticks_between_readings() {
+        let usage = cpu_usage_between([100, 50, 1000, 0], [130, 60, 1050, 10]);
+
+        assert_eq!(usage, Some(50.0));
+    }
+
+    #[test]
+    fn cpu_usage_counts_ticks_across_counter_wraparound() {
+        let usage = cpu_usage_between([u32::MAX, 0, 0, 0], [9, 0, 10, 0]);
+
+        assert_eq!(usage, Some(50.0));
+    }
+
+    #[test]
+    fn cpu_usage_is_unknown_without_new_ticks() {
+        assert_eq!(cpu_usage_between([1, 2, 3, 4], [1, 2, 3, 4]), None);
     }
 
     #[test]
