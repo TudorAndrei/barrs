@@ -1,6 +1,7 @@
 //! The bar: the renderer and the item snapshots that it shows.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::config::Config;
 use crate::error::BarrsError;
@@ -66,6 +67,11 @@ impl<R: Renderer> Bar<R> {
     /// Returns an error when the renderer cannot read its event queue.
     pub fn drain_events(&mut self) -> Result<Vec<EventPayload>, BarrsError> {
         self.renderer.drain_events()
+    }
+
+    /// How long the renderer can wait before its events are drained again.
+    pub fn event_poll_interval(&self) -> Duration {
+        self.renderer.event_poll_interval()
     }
 
     /// Applies an item event, such as a hover, to the renderer.

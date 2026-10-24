@@ -49,6 +49,9 @@ pub enum Completion<T> {
     Items(Production<T>),
     /// A resync fetch updated the Rift tracker; nothing to render yet.
     RiftResync,
+    /// Rift events arrived, or a Rift render debounce is due: call
+    /// [`SnapshotProducer::poll_rift`].
+    RiftPending,
 }
 
 /// The snapshots that one [`SnapshotProducer::request`] produced.
@@ -170,11 +173,22 @@ impl<T: Send + 'static> SnapshotProducer<T> {
         });
     }
 
-    /// Waits for the next finished request or Rift resync fetch.
+    /// Waits for the next finished request or Rift resync fetch, Rift
+    /// event, or due Rift render debounce.
     ///
-    /// A resync result goes into the Rift tracker before this returns.
+    /// A resync result or Rift event goes into the Rift tracker before this
+    /// returns.
     pub async fn next(&mut self) -> Completion<T> {
-        let Some(message) = self.receiver.recv().await else {
+        let debounce = self.rift.deadline();
+        let message = tokio::select! {
+            message = self.receiver.recv() => message,
+            Some(event) = next_rift_event(self.subscription.as_mut()) => {
+                self.on_rift_events(&[event], Instant::now());
+                return Completion::RiftPending;
+            }
+            () = sleep_until_due(debounce) => return Completion::RiftPending,
+        };
+        let Some(message) = message else {
             // The producer keeps a sender, so the channel never closes.
             return std::future::pending().await;
         };
@@ -200,7 +214,7 @@ impl<T: Send + 'static> SnapshotProducer<T> {
     ) -> Result<Vec<RenderItemSnapshot>, BarrsError> {
         let events = self
             .subscription
-            .as_ref()
+            .as_mut()
             .map(RiftSubscription::drain)
             .unwrap_or_default();
         self.on_rift_events(&events, now);
@@ -332,6 +346,22 @@ fn snapshot_for_item(
     Ok(RenderItemSnapshot::from_item_config(item, order, content))
 }
 
+/// The next event of `subscription`; waits forever without one.
+async fn next_rift_event(subscription: Option<&mut RiftSubscription>) -> Option<RiftEvent> {
+    match subscription {
+        Some(subscription) => subscription.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Waits until `deadline`; waits forever without one.
+async fn sleep_until_due(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -390,9 +420,12 @@ mod tests {
     async fn produce(producer: &mut SnapshotProducer<()>, item_ids: &[&str]) -> Production<()> {
         let item_ids: Vec<String> = item_ids.iter().map(|&id| id.to_owned()).collect();
         producer.request(&config(), &item_ids, ());
-        match producer.next().await {
-            Completion::Items(production) => production,
-            Completion::RiftResync => panic!("no resync was requested"),
+        loop {
+            match producer.next().await {
+                Completion::Items(production) => return production,
+                Completion::RiftResync => panic!("no resync was requested"),
+                Completion::RiftPending => {}
+            }
         }
     }
 

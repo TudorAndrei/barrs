@@ -1,10 +1,13 @@
+#[cfg(target_os = "macos")]
+use std::cell::RefCell;
 use std::collections::HashMap;
 #[cfg(target_os = "macos")]
 use std::ffi::c_void;
 #[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 #[cfg(target_os = "macos")]
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
@@ -51,6 +54,13 @@ const ITEM_TEXT_HEIGHT: f64 = 24.0;
 const ITEM_TRAILING_TEXT_PADDING: f64 = 0.0;
 const BAR_HEIGHT: f64 = 28.0;
 const DEFAULT_ITEM_SPACING: f64 = 6.0;
+/// The wait between event polls while the pointer is on or near the bar.
+pub const ACTIVE_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+/// The wait between event polls while the pointer is away from the bar.
+pub const IDLE_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// How far from the bar, in points, the pointer counts as near it.
+#[cfg(target_os = "macos")]
+const POINTER_NEAR_BAR_MARGIN: f64 = 48.0;
 #[cfg(target_os = "macos")]
 const DISPLAY_RECONFIGURATION_SETTLE_MS: u64 = 500;
 #[cfg(target_os = "macos")]
@@ -98,6 +108,11 @@ pub trait Renderer {
     fn drain_events(&mut self) -> Result<Vec<EventPayload>, BarrsError> {
         Ok(Vec::new())
     }
+    /// How long the caller can wait before it calls [`Self::drain_events`]
+    /// again and still deliver input on time.
+    fn event_poll_interval(&self) -> Duration {
+        ACTIVE_EVENT_POLL_INTERVAL
+    }
     /// Applies an event to the renderer state.
     ///
     /// # Errors
@@ -123,6 +138,10 @@ impl<T: Renderer + ?Sized> Renderer for Box<T> {
 
     fn drain_events(&mut self) -> Result<Vec<EventPayload>, BarrsError> {
         (**self).drain_events()
+    }
+
+    fn event_poll_interval(&self) -> Duration {
+        (**self).event_poll_interval()
     }
 
     fn handle_event(&mut self, event: &EventPayload) -> Result<(), BarrsError> {
@@ -655,6 +674,9 @@ trait NativeHost {
     fn drain_events(&mut self) -> Result<Vec<EventPayload>, BarrsError> {
         Ok(Vec::new())
     }
+    fn event_poll_interval(&self) -> Duration {
+        ACTIVE_EVENT_POLL_INTERVAL
+    }
 }
 
 /// The host without a window: tests use it, and the native renderer uses it
@@ -721,8 +743,12 @@ struct AppKitHost {
     item_views: HashMap<String, AppKitItemView>,
     pending_events: Vec<EventPayload>,
     pointer_item: Option<String>,
+    /// The pointer location, in window coordinates, at the last hover poll.
+    pointer_location: Option<NSPoint>,
     background: Option<String>,
     current_screen_signature: Option<ScreenSignature>,
+    /// The bar screen geometry; a display reconfiguration clears it.
+    screen_geometry: RefCell<Option<ScreenGeometry>>,
     display_reconfiguration_pending: Option<Box<AtomicBool>>,
     display_reconfiguration_deadline: Option<Instant>,
     display_reconfiguration_rebuilds_remaining: u8,
@@ -750,11 +776,38 @@ impl NativeHost for AppKitHost {
         config: &Config,
         _bar_height: f64,
     ) -> Result<LayoutGeometry, BarrsError> {
-        let mtm = main_thread_marker()?;
-        Ok(bar_screen_layout_geometry(config, mtm))
+        Ok(self
+            .bar_screen_geometry()?
+            .map_or_else(LayoutGeometry::default, |screen| {
+                screen_layout_geometry(config, &screen)
+            }))
     }
 
     fn present(&mut self, scene: &BarScene) -> Result<(), BarrsError> {
+        objc2::rc::autoreleasepool(|_| self.present_in_pool(scene))
+    }
+
+    fn drain_events(&mut self) -> Result<Vec<EventPayload>, BarrsError> {
+        objc2::rc::autoreleasepool(|_| self.drain_events_in_pool())
+    }
+
+    /// Polls fast while the pointer is on or near the bar, so hovers and
+    /// clicks respond at once, and while a display change settles.
+    fn event_poll_interval(&self) -> Duration {
+        if self.pointer_item.is_some()
+            || self.display_reconfiguration_deadline.is_some()
+            || self.pointer_near_bar()
+        {
+            ACTIVE_EVENT_POLL_INTERVAL
+        } else {
+            IDLE_EVENT_POLL_INTERVAL
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl AppKitHost {
+    fn present_in_pool(&mut self, scene: &BarScene) -> Result<(), BarrsError> {
         self.prepare_for_target_display()?;
         let next_plan = host_scene_plan(scene);
         let commands = diff_host_scene(self.last_plan.as_ref(), &next_plan);
@@ -766,7 +819,7 @@ impl NativeHost for AppKitHost {
         Ok(())
     }
 
-    fn drain_events(&mut self) -> Result<Vec<EventPayload>, BarrsError> {
+    fn drain_events_in_pool(&mut self) -> Result<Vec<EventPayload>, BarrsError> {
         self.pump_events();
         let hover_events = self.poll_hover_payloads();
         self.pending_events.extend(hover_events);
@@ -775,10 +828,11 @@ impl NativeHost for AppKitHost {
         let reconfiguration_rebuild_due = self.display_reconfiguration_rebuild_due();
         if screen_changed || reconfiguration_rebuild_due {
             if reconfiguration_rebuild_due {
+                self.screen_geometry.replace(None);
                 self.invalidate_native_window("display-reconfiguration-rebuild");
             }
             if let Some(scene) = self.last_scene.clone() {
-                self.present(&scene)?;
+                self.present_in_pool(&scene)?;
             }
         }
         Ok(std::mem::take(&mut self.pending_events))
@@ -886,6 +940,7 @@ impl AppKitHost {
         }
 
         debug_display_state("display-reconfiguration-callback", None);
+        self.screen_geometry.replace(None);
         self.invalidate_native_window("display-reconfiguration-start");
         self.display_reconfiguration_rebuilds_remaining = DISPLAY_RECONFIGURATION_REBUILDS;
         self.display_reconfiguration_deadline =
@@ -915,7 +970,9 @@ impl AppKitHost {
     fn invalidate_native_window(&mut self, reason: &str) {
         debug_display_state(reason, None);
         if let Some(window) = self.window.take() {
-            window.orderOut(None);
+            // `close` also removes the window from the app's window list, which
+            // would keep it, and its item views, alive after `orderOut`.
+            window.close();
         }
         self.content_view = None;
         self.item_views.clear();
@@ -923,8 +980,40 @@ impl AppKitHost {
         self.current_screen_signature = None;
     }
 
+    /// The geometry of the screen that shows the bar.
+    ///
+    /// Only a display reconfiguration changes it, so the first lookup after
+    /// one is kept until the next.
+    fn bar_screen_geometry(&self) -> Result<Option<ScreenGeometry>, BarrsError> {
+        if let Some(screen) = self.screen_geometry.borrow().as_ref() {
+            return Ok(Some(screen.clone()));
+        }
+        let mtm = main_thread_marker()?;
+        let screen = objc2::rc::autoreleasepool(|_| {
+            bar_screen(mtm).map(|screen| appkit_screen_geometry(&screen))
+        });
+        self.screen_geometry.replace(screen.clone());
+        Ok(screen)
+    }
+
+    fn target_screen_signature(&self) -> Result<Option<ScreenSignature>, BarrsError> {
+        Ok(self
+            .bar_screen_geometry()?
+            .map(|screen| ScreenSignature::from(&screen)))
+    }
+
+    fn pointer_near_bar(&self) -> bool {
+        let (Some(window), Some(location)) = (&self.window, self.pointer_location) else {
+            return false;
+        };
+        let size = window.frame().size;
+        (0.0..=size.width).contains(&location.x)
+            && (-POINTER_NEAR_BAR_MARGIN..=size.height + POINTER_NEAR_BAR_MARGIN)
+                .contains(&location.y)
+    }
+
     fn prepare_for_target_display(&mut self) -> Result<(), BarrsError> {
-        let target_screen_signature = target_screen_signature()?;
+        let target_screen_signature = self.target_screen_signature()?;
         if self.current_screen_signature == target_screen_signature {
             return Ok(());
         }
@@ -935,7 +1024,7 @@ impl AppKitHost {
     }
 
     fn target_screen_changed(&self) -> Result<bool, BarrsError> {
-        Ok(self.current_screen_signature != target_screen_signature()?)
+        Ok(self.current_screen_signature != self.target_screen_signature()?)
     }
 
     fn pump_events(&mut self) {
@@ -1017,6 +1106,8 @@ impl AppKitHost {
         };
 
         let location = window.mouseLocationOutsideOfEventStream();
+        let moved = self.pointer_location != Some(location);
+        self.pointer_location = Some(location);
         let next_item = self.last_scene.as_ref().and_then(|scene| {
             scene.items.iter().find_map(|item| {
                 if item.frame.contains(location.x, location.y) {
@@ -1028,6 +1119,7 @@ impl AppKitHost {
         });
 
         match (self.pointer_item.clone(), next_item) {
+            (Some(previous), Some(next)) if previous == next && !moved => Vec::new(),
             (Some(previous), Some(next)) if previous == next => {
                 vec![synthetic_event_payload(
                     next,
@@ -1564,20 +1656,6 @@ fn bar_screen(mtm: MainThreadMarker) -> Option<objc2::rc::Retained<NSScreen>> {
     NSScreen::mainScreen(mtm).or_else(|| screens.firstObject())
 }
 
-#[cfg(target_os = "macos")]
-fn target_screen_signature() -> Result<Option<ScreenSignature>, BarrsError> {
-    let mtm = main_thread_marker()?;
-    Ok(bar_screen(mtm).map(|screen| ScreenSignature::from(&appkit_screen_geometry(&screen))))
-}
-
-#[cfg(target_os = "macos")]
-fn bar_screen_layout_geometry(config: &Config, mtm: MainThreadMarker) -> LayoutGeometry {
-    let Some(screen) = bar_screen(mtm) else {
-        return LayoutGeometry::default();
-    };
-    screen_layout_geometry(config, &appkit_screen_geometry(&screen))
-}
-
 #[derive(Debug, Clone)]
 struct ScreenGeometry {
     display_id: u32,
@@ -1896,6 +1974,10 @@ impl Renderer for NativeRenderer {
         Ok(events)
     }
 
+    fn event_poll_interval(&self) -> Duration {
+        self.host.event_poll_interval()
+    }
+
     fn handle_event(&mut self, event: &EventPayload) -> Result<(), BarrsError> {
         if self.state.handle_event(event) {
             self.publish_scene()?;
@@ -1910,6 +1992,11 @@ pub struct NoopRenderer;
 impl Renderer for NoopRenderer {
     fn render_item(&mut self, _snapshot: &RenderItemSnapshot) -> Result<(), BarrsError> {
         Ok(())
+    }
+
+    /// The noop renderer has no input, so its events need no fast poll.
+    fn event_poll_interval(&self) -> Duration {
+        IDLE_EVENT_POLL_INTERVAL
     }
 
     fn reconcile(
