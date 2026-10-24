@@ -1,27 +1,19 @@
 use std::ffi::{CStr, CString};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde_json::{Value, json};
+use serde_json::json;
 
+use crate::content::{ItemContent, Workspace};
 use crate::error::BarrsError;
 use crate::process::run_command_with_timeout;
 use crate::rift::RiftSnapshot;
 
 const SYSTEM_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 const TIME_FORMAT: &str = "%H:%M";
-const PLACEHOLDER_TEXT: &str = "—";
 
-/// Snapshot data for an item whose data source cannot report a value.
-pub(crate) fn unavailable_snapshot() -> Value {
-    json!({
-        "text": PLACEHOLDER_TEXT,
-        "available": false
-    })
-}
-
-/// Current CPU usage, or the unavailable placeholder.
-pub(crate) fn cpu() -> Value {
-    cpu_snapshot_from_top().unwrap_or_else(unavailable_snapshot)
+/// Current CPU usage, or unavailable content.
+pub(crate) fn cpu() -> ItemContent {
+    cpu_snapshot_from_top().unwrap_or(ItemContent::Unavailable)
 }
 
 /// Current local time.
@@ -29,11 +21,11 @@ pub(crate) fn cpu() -> Value {
 /// # Errors
 ///
 /// Returns an error when the local time cannot be formatted.
-pub(crate) fn time() -> Result<Value, BarrsError> {
-    Ok(json!({
-        "text": format_local_time(TIME_FORMAT)?,
-        "timezone": "local"
-    }))
+pub(crate) fn time() -> Result<ItemContent, BarrsError> {
+    Ok(ItemContent::plain_with_fields(
+        format_local_time(TIME_FORMAT)?,
+        [("timezone", json!("local"))],
+    ))
 }
 
 /// Current local date in the `strftime` `format`.
@@ -41,51 +33,52 @@ pub(crate) fn time() -> Result<Value, BarrsError> {
 /// # Errors
 ///
 /// Returns an error when the local date cannot be formatted.
-pub(crate) fn date(format: &str) -> Result<Value, BarrsError> {
-    Ok(json!({
-        "text": format_local_time(format)?,
-        "timezone": "local",
-        "format": format,
-    }))
+pub(crate) fn date(format: &str) -> Result<ItemContent, BarrsError> {
+    Ok(ItemContent::plain_with_fields(
+        format_local_time(format)?,
+        [("timezone", json!("local")), ("format", json!(format))],
+    ))
 }
 
-/// Current battery charge, or the unavailable placeholder.
-pub(crate) fn battery() -> Value {
-    battery_snapshot_from_pmset().unwrap_or_else(unavailable_snapshot)
+/// Current battery charge, or unavailable content.
+pub(crate) fn battery() -> ItemContent {
+    battery_snapshot_from_pmset().unwrap_or(ItemContent::Unavailable)
 }
 
-/// Current GPU utilization, or the unavailable placeholder.
-pub(crate) fn gpu() -> Value {
-    gpu_snapshot_from_ioreg().unwrap_or_else(unavailable_snapshot)
+/// Current GPU utilization, or unavailable content.
+pub(crate) fn gpu() -> ItemContent {
+    gpu_snapshot_from_ioreg().unwrap_or(ItemContent::Unavailable)
 }
 
-/// Rift workspaces, or the unavailable placeholder without a snapshot.
-pub(crate) fn rift_workspaces(rift: Option<&RiftSnapshot>) -> Value {
-    rift.map_or_else(unavailable_snapshot, |snapshot| {
-        json!({
-            "text": snapshot.workspaces.iter().map(|workspace| workspace.name.as_str()).collect::<Vec<_>>().join(" "),
-            "current_workspace": snapshot.current_workspace,
-            "workspaces": snapshot.workspaces.iter().map(|workspace| json!({
-                "name": workspace.name,
-                "is_current": workspace.is_current,
-                "window_count": workspace.window_count,
-                "has_windows": workspace.has_windows
-            })).collect::<Vec<_>>(),
-        })
+/// Rift workspaces, or unavailable content without a snapshot.
+pub(crate) fn rift_workspaces(rift: Option<&RiftSnapshot>) -> ItemContent {
+    rift.map_or(ItemContent::Unavailable, |snapshot| {
+        ItemContent::Workspaces {
+            current: snapshot.current_workspace.clone(),
+            workspaces: snapshot
+                .workspaces
+                .iter()
+                .map(|workspace| Workspace {
+                    name: workspace.name.clone(),
+                    is_current: workspace.is_current,
+                    window_count: workspace.window_count,
+                })
+                .collect(),
+        }
     })
 }
 
-/// Rift layout, or the unavailable placeholder without a snapshot.
-pub(crate) fn rift_layout(rift: Option<&RiftSnapshot>) -> Value {
-    rift.map_or_else(unavailable_snapshot, |snapshot| {
-        json!({
-            "text": snapshot.layout,
-            "window_count": snapshot.window_count
-        })
+/// Rift layout, or unavailable content without a snapshot.
+pub(crate) fn rift_layout(rift: Option<&RiftSnapshot>) -> ItemContent {
+    rift.map_or(ItemContent::Unavailable, |snapshot| {
+        ItemContent::plain_with_fields(
+            snapshot.layout.clone(),
+            [("window_count", json!(snapshot.window_count))],
+        )
     })
 }
 
-fn cpu_snapshot_from_top() -> Option<Value> {
+fn cpu_snapshot_from_top() -> Option<ItemContent> {
     #[cfg(target_os = "macos")]
     {
         let output =
@@ -101,7 +94,7 @@ fn cpu_snapshot_from_top() -> Option<Value> {
     }
 }
 
-fn parse_cpu_output(output: &str) -> Option<Value> {
+fn parse_cpu_output(output: &str) -> Option<ItemContent> {
     let line = output
         .lines()
         .rev()
@@ -115,10 +108,10 @@ fn parse_cpu_output(output: &str) -> Option<Value> {
         .filter_map(|number| number.trim().parse::<f64>().ok())
         .sum::<f64>();
     let rounded = usage.round();
-    Some(json!({
-        "text": format!("{rounded:.0}%"),
-        "usage_percent": usage
-    }))
+    Some(ItemContent::plain_with_fields(
+        format!("{rounded:.0}%"),
+        [("usage_percent", json!(usage))],
+    ))
 }
 
 fn format_local_time(format: &str) -> Result<String, BarrsError> {
@@ -158,7 +151,7 @@ fn format_local_time(format: &str) -> Result<String, BarrsError> {
     Ok(formatted.to_string_lossy().into_owned())
 }
 
-fn battery_snapshot_from_pmset() -> Option<Value> {
+fn battery_snapshot_from_pmset() -> Option<ItemContent> {
     #[cfg(target_os = "macos")]
     {
         let output = run_command_with_timeout("pmset", &["-g", "batt"], SYSTEM_QUERY_TIMEOUT)?;
@@ -173,7 +166,7 @@ fn battery_snapshot_from_pmset() -> Option<Value> {
     }
 }
 
-fn gpu_snapshot_from_ioreg() -> Option<Value> {
+fn gpu_snapshot_from_ioreg() -> Option<ItemContent> {
     #[cfg(target_os = "macos")]
     {
         let output = run_command_with_timeout(
@@ -192,7 +185,7 @@ fn gpu_snapshot_from_ioreg() -> Option<Value> {
     }
 }
 
-fn parse_gpu_output(output: &str) -> Option<Value> {
+fn parse_gpu_output(output: &str) -> Option<ItemContent> {
     let marker = "\"Device Utilization %\"=";
     let (_, tail) = output.split_once(marker)?;
     let number: String = tail
@@ -201,13 +194,13 @@ fn parse_gpu_output(output: &str) -> Option<Value> {
         .take_while(char::is_ascii_digit)
         .collect();
     let utilization = number.parse::<u8>().ok()?;
-    Some(json!({
-        "text": format!("{utilization}%"),
-        "utilization_percent": utilization
-    }))
+    Some(ItemContent::plain_with_fields(
+        format!("{utilization}%"),
+        [("utilization_percent", json!(utilization))],
+    ))
 }
 
-fn parse_battery_output(output: &str) -> Option<Value> {
+fn parse_battery_output(output: &str) -> Option<ItemContent> {
     let lower = output.to_ascii_lowercase();
     let percentage = output
         .split_whitespace()
@@ -218,32 +211,26 @@ fn parse_battery_output(output: &str) -> Option<Value> {
         })
         .and_then(|value| value.parse::<u8>().ok())?;
     let charging = lower.contains("ac power") || lower.contains("; charging;");
-    Some(json!({
-        "text": format!("{percentage}%"),
-        "percentage": percentage,
-        "charging": charging
-    }))
+    Some(ItemContent::plain_with_fields(
+        format!("{percentage}%"),
+        [
+            ("percentage", json!(percentage)),
+            ("charging", json!(charging)),
+        ],
+    ))
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::plugin::{
-        parse_battery_output, parse_cpu_output, parse_gpu_output, unavailable_snapshot,
-    };
-
-    #[test]
-    fn unavailable_snapshot_uses_placeholder_text() {
-        let snapshot = unavailable_snapshot();
-        assert_eq!(snapshot["text"], super::PLACEHOLDER_TEXT);
-        assert_eq!(snapshot["available"], false);
-    }
+    use crate::plugin::{parse_battery_output, parse_cpu_output, parse_gpu_output};
 
     #[test]
     fn parses_battery_output() {
         let snapshot = parse_battery_output(
             "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=1234567)\t81%; discharging; 3:21 remaining present: true",
         )
-        .expect("parsed battery output");
+        .expect("parsed battery output")
+        .data();
         assert_eq!(snapshot["percentage"], 81);
         assert_eq!(snapshot["charging"], false);
     }
@@ -253,7 +240,8 @@ mod tests {
         let snapshot = parse_cpu_output(
             "CPU usage: 7.42% user, 5.09% sys, 87.48% idle\nCPU usage: 8.00% user, 4.00% sys, 88.00% idle",
         )
-        .expect("parsed cpu output");
+        .expect("parsed cpu output")
+        .data();
         assert_eq!(snapshot["text"], "12%");
         assert_eq!(snapshot["usage_percent"], 12.0);
     }
@@ -263,7 +251,8 @@ mod tests {
         let snapshot = parse_gpu_output(
             "\"PerformanceStatistics\" = {\"Tiler Utilization %\"=14,\"Renderer Utilization %\"=40,\"Device Utilization %\"=40}",
         )
-        .expect("parsed gpu output");
+        .expect("parsed gpu output")
+        .data();
         assert_eq!(snapshot["text"], "40%");
         assert_eq!(snapshot["utilization_percent"], 40);
     }

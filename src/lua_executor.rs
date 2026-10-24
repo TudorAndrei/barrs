@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::config::{Config, load_config_with_runtime};
+use crate::content::ItemContent;
 use crate::error::BarrsError;
 
 /// Longest time one Lua event handler may run before barrs stops it.
@@ -31,8 +32,8 @@ pub struct UpdateResult {
     /// Config generation that requested the update.
     pub epoch: u64,
     pub item_id: String,
-    /// Item snapshot data with a string `text`, or the reason the call failed.
-    pub outcome: Result<Value, BarrsError>,
+    /// Text content of the item, or the reason the call failed.
+    pub outcome: Result<ItemContent, BarrsError>,
 }
 
 enum Job {
@@ -172,7 +173,7 @@ fn run_handler(lua: &Lua, function: &str, context: &Value) -> Result<(), BarrsEr
     call_with_timeout::<()>(lua, &func, context, HANDLER_TIMEOUT)
 }
 
-fn run_update(lua: &Lua, function: &str, item_id: &str) -> Result<Value, BarrsError> {
+fn run_update(lua: &Lua, function: &str, item_id: &str) -> Result<ItemContent, BarrsError> {
     let func: Function = lua
         .globals()
         .get(function)
@@ -184,14 +185,16 @@ fn run_update(lua: &Lua, function: &str, item_id: &str) -> Result<Value, BarrsEr
         });
     let context = lua.to_value(&json!({ "item_id": item_id, "timestamp_ms": timestamp_ms }))?;
     let returned = call_with_timeout::<mlua::Value>(lua, &func, context, UPDATE_TIMEOUT)?;
-    update_data(lua, returned)
+    update_content(lua, returned)
 }
 
-/// Converts the value an update function returned into item snapshot data.
+/// Converts the value an update function returned into text content.
 ///
-/// A string becomes `{ text = string }`. A table must serialize to a JSON
-/// object with a string `text`; its other fields stay in the snapshot data.
-fn update_data(lua: &Lua, returned: mlua::Value) -> Result<Value, BarrsError> {
+/// A string becomes the text. A table must serialize to a JSON object with a
+/// string `text`; its other fields stay in the item data. The result is always
+/// text content, so a table field such as `workspaces` does not change the
+/// layout.
+fn update_content(lua: &Lua, returned: mlua::Value) -> Result<ItemContent, BarrsError> {
     let data = match returned {
         mlua::Value::String(text) => json!({ "text": &*text.to_str()? }),
         mlua::Value::Table(_) => lua.from_value::<Value>(returned)?,
@@ -202,18 +205,23 @@ fn update_data(lua: &Lua, returned: mlua::Value) -> Result<Value, BarrsError> {
             )));
         }
     };
-    if !data.get("text").is_some_and(Value::is_string) {
-        return Err(BarrsError::Lua(
-            "update result must be a table with a string text field".into(),
-        ));
-    }
     let size = serde_json::to_vec(&data)?.len();
+    let Value::Object(mut fields) = data else {
+        return Err(missing_text());
+    };
+    let Some(Value::String(text)) = fields.remove("text") else {
+        return Err(missing_text());
+    };
     if size > MAX_UPDATE_RESULT_BYTES {
         return Err(BarrsError::Lua(format!(
             "update result is {size} bytes, more than the {MAX_UPDATE_RESULT_BYTES} byte limit"
         )));
     }
-    Ok(data)
+    Ok(ItemContent::Text { text, fields })
+}
+
+fn missing_text() -> BarrsError {
+    BarrsError::Lua("update result must be a table with a string text field".into())
 }
 
 /// Calls `func` and stops it with an error if it runs longer than `timeout`.
@@ -254,7 +262,8 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{LuaExecutor, UpdateResult, call_with_timeout, update_data};
+    use super::{LuaExecutor, UpdateResult, call_with_timeout, update_content};
+    use crate::content::ItemContent;
 
     #[test]
     fn call_that_never_returns_is_stopped() {
@@ -306,21 +315,31 @@ return { items = { { id = "clock", handlers = { click = "count" } } } }
             .expect("globals persist between calls");
     }
 
-    fn update_data_for(lua_value: &str) -> Result<serde_json::Value, crate::error::BarrsError> {
+    fn update_content_for(lua_value: &str) -> Result<ItemContent, crate::error::BarrsError> {
         let lua = mlua::Lua::new();
         let value: mlua::Value = lua.load(lua_value).eval().expect("evaluate value");
-        update_data(&lua, value)
+        update_content(&lua, value)
     }
 
     #[test]
-    fn update_data_accepts_strings_and_tables_with_text() {
+    fn update_content_accepts_strings_and_tables_with_text() {
         assert_eq!(
-            update_data_for(r#""42%""#).expect("string"),
-            json!({ "text": "42%" })
+            update_content_for(r#""42%""#).expect("string"),
+            ItemContent::plain("42%")
         );
         assert_eq!(
-            update_data_for(r#"{ text = "42%", icon = "M", used = 42 }"#).expect("table"),
-            json!({ "text": "42%", "icon": "M", "used": 42 })
+            update_content_for(r#"{ text = "42%", icon = "M", used = 42 }"#).expect("table"),
+            ItemContent::plain_with_fields("42%", [("icon", json!("M")), ("used", json!(42))])
+        );
+    }
+
+    #[test]
+    fn update_content_is_text_even_with_a_workspaces_field() {
+        let content = update_content_for(r#"{ text = "1 2", workspaces = { { name = "1" } } }"#)
+            .expect("table");
+        assert_eq!(
+            content,
+            ItemContent::plain_with_fields("1 2", [("workspaces", json!([{ "name": "1" }]))])
         );
     }
 
@@ -335,7 +354,7 @@ return { items = { { id = "clock", handlers = { click = "count" } } } }
             (r#"{ text = string.rep("x", 20000) }"#, "byte limit"),
         ];
         for (value, expected) in cases {
-            let error = update_data_for(value).expect_err(value);
+            let error = update_content_for(value).expect_err(value);
             assert!(error.to_string().contains(expected), "{value}: {error}");
         }
     }
@@ -363,7 +382,7 @@ return { items = { { id = "memory", plugin = { kind = "lua", update = "usage" } 
         assert_eq!((result.epoch, result.item_id.as_str()), (7, "memory"));
         assert_eq!(
             result.outcome.expect("outcome"),
-            json!({ "text": "memory", "stamped": true })
+            ItemContent::plain_with_fields("memory", [("stamped", json!(true))])
         );
 
         executor

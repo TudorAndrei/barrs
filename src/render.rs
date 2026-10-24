@@ -6,11 +6,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(target_os = "macos")]
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Serialize, Serializer};
 use usage_rs::ValueEnum;
 
 use crate::config::{BarSection, Config, HoverConfig, ItemConfig};
+use crate::content::{ItemContent, Workspace};
 use crate::error::BarrsError;
 use crate::ipc::{EventKind, EventPayload, current_timestamp_ms};
 
@@ -140,38 +141,51 @@ impl<T: Renderer + ?Sized> Renderer for Box<T> {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// One item as the renderer draws it.
+///
+/// It serializes, for `dump-state`, with the item `text` and `data` that
+/// [`ItemContent::text`] and [`ItemContent::data`] give.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderItemSnapshot {
     pub id: String,
     pub order: usize,
     pub label: Option<String>,
     pub icon: Option<String>,
     pub placement: Option<String>,
-    pub text: String,
     pub hover: Option<HoverSurface>,
     pub interactive: InteractiveSnapshot,
-    pub data: Value,
+    pub content: ItemContent,
 }
 
 impl RenderItemSnapshot {
-    pub fn from_item_config(item: &ItemConfig, order: usize, data: Value) -> Self {
-        let text = data
-            .get("text")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| item.label.clone())
-            .unwrap_or_else(|| item.id.clone());
+    #[must_use]
+    pub fn from_item_config(item: &ItemConfig, order: usize, content: ItemContent) -> Self {
         Self {
             id: item.id.clone(),
             order,
             label: item.label.clone(),
             icon: item.icon.clone(),
             placement: item.placement.clone(),
-            text,
             hover: item.hover.as_ref().map(HoverSurface::from),
             interactive: InteractiveSnapshot::from_handlers(item),
-            data,
+            content,
         }
+    }
+}
+
+impl Serialize for RenderItemSnapshot {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut state = serializer.serialize_struct("RenderItemSnapshot", 9)?;
+        state.serialize_field("id", &self.id)?;
+        state.serialize_field("order", &self.order)?;
+        state.serialize_field("label", &self.label)?;
+        state.serialize_field("icon", &self.icon)?;
+        state.serialize_field("placement", &self.placement)?;
+        state.serialize_field("text", &self.content.text())?;
+        state.serialize_field("hover", &self.hover)?;
+        state.serialize_field("interactive", &self.interactive)?;
+        state.serialize_field("data", &self.content)?;
+        state.end()
     }
 }
 
@@ -229,7 +243,7 @@ impl ItemFrame {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PositionedItemSnapshot {
     pub snapshot: RenderItemSnapshot,
     pub frame: ItemFrame,
@@ -244,7 +258,7 @@ pub struct HoverPresentation {
     pub detail: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct BarScene {
     pub bar_height: f64,
     pub bar_width: f64,
@@ -396,7 +410,7 @@ impl HostRuntimeState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct NativeSurfaceState {
     pub bar_height: f64,
     pub item_spacing: f64,
@@ -2010,10 +2024,10 @@ fn split_middle_indices(
 }
 
 fn measure_snapshot_text_width(snapshot: &RenderItemSnapshot) -> f64 {
-    if let Some(width) = measure_workspace_text_width(snapshot) {
-        return width;
+    if let ItemContent::Workspaces { workspaces, .. } = &snapshot.content {
+        return measure_workspace_text_width(workspaces);
     }
-    count_to_f64(stable_text_char_count(&snapshot.text)) * CHARACTER_WIDTH
+    count_to_f64(stable_text_char_count(&snapshot.content.text())) * CHARACTER_WIDTH
 }
 
 fn stable_text_char_count(text: &str) -> usize {
@@ -2026,52 +2040,41 @@ fn stable_text_char_count(text: &str) -> usize {
     text.chars().count()
 }
 
-fn measure_workspace_text_width(snapshot: &RenderItemSnapshot) -> Option<f64> {
-    let workspaces = snapshot.data.get("workspaces")?.as_array()?;
+fn measure_workspace_text_width(workspaces: &[Workspace]) -> f64 {
     let mut width = 0.0;
     for (index, workspace) in workspaces.iter().enumerate() {
-        let name = workspace.get("name").and_then(Value::as_str)?;
         if index > 0 {
             width += DEFAULT_ITEM_SPACING;
         }
-        width = count_to_f64(name.chars().count()).mul_add(CHARACTER_WIDTH, width);
+        width = count_to_f64(workspace.name.chars().count()).mul_add(CHARACTER_WIDTH, width);
     }
-    Some(width)
+    width
 }
 
 fn workspace_text_segments(
-    snapshot: &RenderItemSnapshot,
+    workspaces: &[Workspace],
     base_x: f64,
     center_y: f64,
-) -> Option<Vec<TextLayerPlan>> {
-    let workspaces = snapshot.data.get("workspaces")?.as_array()?;
+) -> Vec<TextLayerPlan> {
     let mut cursor = base_x;
     let mut segments = Vec::with_capacity(workspaces.len());
     for workspace in workspaces {
-        let name = workspace.get("name").and_then(Value::as_str)?.to_string();
-        let is_current = workspace
-            .get("is_current")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let has_windows = workspace
-            .get("has_windows")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
         segments.push(TextLayerPlan {
-            value: name.clone(),
+            value: workspace.name.clone(),
             x: cursor,
             y: center_y,
-            tone: if is_current {
+            tone: if workspace.is_current {
                 TextTone::Primary
-            } else if has_windows {
+            } else if workspace.has_windows() {
                 TextTone::Secondary
             } else {
                 TextTone::Tertiary
             },
         });
-        cursor += count_to_f64(name.chars().count()).mul_add(CHARACTER_WIDTH, DEFAULT_ITEM_SPACING);
+        cursor += count_to_f64(workspace.name.chars().count())
+            .mul_add(CHARACTER_WIDTH, DEFAULT_ITEM_SPACING);
     }
-    Some(segments)
+    segments
 }
 
 fn host_scene_plan(scene: &BarScene) -> HostScenePlan {
@@ -2096,16 +2099,17 @@ fn host_scene_plan(scene: &BarScene) -> HostScenePlan {
                 } else {
                     0.0
                 };
-            let text_segments =
-                workspace_text_segments(&item.snapshot, text_x, item.frame.height / 2.0)
-                    .unwrap_or_else(|| {
-                        vec![TextLayerPlan {
-                            value: item.snapshot.text.clone(),
-                            x: text_x,
-                            y: item.frame.height / 2.0,
-                            tone: TextTone::Secondary,
-                        }]
-                    });
+            let text_segments = match &item.snapshot.content {
+                ItemContent::Workspaces { workspaces, .. } => {
+                    workspace_text_segments(workspaces, text_x, item.frame.height / 2.0)
+                }
+                content => vec![TextLayerPlan {
+                    value: content.text().into_owned(),
+                    x: text_x,
+                    y: item.frame.height / 2.0,
+                    tone: TextTone::Secondary,
+                }],
+            };
             ItemLayerPlan {
                 item_id: item.snapshot.id.clone(),
                 frame: item.frame.clone(),
@@ -2266,6 +2270,7 @@ mod tests {
     use serde_json::json;
 
     use crate::config::{Config, HoverConfig, ItemConfig, ItemHandlers};
+    use crate::content::{ItemContent, Workspace};
     use crate::ipc::{EventKind, EventPayload, Modifiers, MouseState};
 
     use super::{
@@ -2286,7 +2291,6 @@ mod tests {
             label: None,
             icon: None,
             placement: placement.map(str::to_owned),
-            text: text.into(),
             hover: None,
             interactive: InteractiveSnapshot {
                 click: false,
@@ -2294,7 +2298,7 @@ mod tests {
                 scroll: false,
                 hover: false,
             },
-            data: json!({ "text": text }),
+            content: ItemContent::plain(text),
         }
     }
 
@@ -2364,9 +2368,9 @@ mod tests {
         let snapshot = RenderItemSnapshot::from_item_config(
             &item,
             0,
-            json!({ "text": "13%", "usage_percent": 13.0 }),
+            ItemContent::plain_with_fields("13%", [("usage_percent", json!(13.0))]),
         );
-        assert_eq!(snapshot.text, "13%");
+        assert_eq!(snapshot.content.text(), "13%");
         assert!(snapshot.interactive.click);
         assert!(snapshot.interactive.hover);
     }
@@ -2396,7 +2400,6 @@ mod tests {
                 label: Some("CPU".into()),
                 icon: None,
                 placement: Some("left".into()),
-                text: "12%".into(),
                 hover: Some(HoverSurface {
                     tooltip: Some("CPU usage".into()),
                     detail: None,
@@ -2407,7 +2410,7 @@ mod tests {
                     scroll: false,
                     hover: true,
                 },
-                data: json!({ "text": "12%" }),
+                content: ItemContent::plain("12%"),
             })
             .expect("render");
 
@@ -2499,7 +2502,6 @@ mod tests {
             label: None,
             icon: Some("cpu".into()),
             placement: Some("left".into()),
-            text: "9%".into(),
             hover: None,
             interactive: InteractiveSnapshot {
                 click: false,
@@ -2507,11 +2509,10 @@ mod tests {
                 scroll: false,
                 hover: false,
             },
-            data: json!({ "text": "9%", "usage_percent": 9 }),
+            content: ItemContent::plain("9%"),
         };
         let mut wider = narrow.clone();
-        wider.text = "10%".into();
-        wider.data = json!({ "text": "10%", "usage_percent": 10 });
+        wider.content = ItemContent::plain("10%");
 
         assert_close(
             super::measure_item_width(&narrow),
@@ -2541,7 +2542,6 @@ mod tests {
                 label: None,
                 icon: None,
                 placement: Some("right".into()),
-                text: "right".into(),
                 hover: None,
                 interactive: InteractiveSnapshot {
                     click: false,
@@ -2549,7 +2549,7 @@ mod tests {
                     scroll: false,
                     hover: false,
                 },
-                data: json!({ "text": "right" }),
+                content: ItemContent::plain("right"),
             },
             RenderItemSnapshot {
                 id: "left-2".into(),
@@ -2557,7 +2557,6 @@ mod tests {
                 label: None,
                 icon: None,
                 placement: Some("left".into()),
-                text: "left-2".into(),
                 hover: None,
                 interactive: InteractiveSnapshot {
                     click: false,
@@ -2565,7 +2564,7 @@ mod tests {
                     scroll: false,
                     hover: false,
                 },
-                data: json!({ "text": "left-2" }),
+                content: ItemContent::plain("left-2"),
             },
             RenderItemSnapshot {
                 id: "middle".into(),
@@ -2573,7 +2572,6 @@ mod tests {
                 label: None,
                 icon: None,
                 placement: Some("middle".into()),
-                text: "middle".into(),
                 hover: None,
                 interactive: InteractiveSnapshot {
                     click: false,
@@ -2581,7 +2579,7 @@ mod tests {
                     scroll: false,
                     hover: false,
                 },
-                data: json!({ "text": "middle" }),
+                content: ItemContent::plain("middle"),
             },
             RenderItemSnapshot {
                 id: "left-1".into(),
@@ -2589,7 +2587,6 @@ mod tests {
                 label: None,
                 icon: None,
                 placement: None,
-                text: "left-1".into(),
                 hover: None,
                 interactive: InteractiveSnapshot {
                     click: false,
@@ -2597,7 +2594,7 @@ mod tests {
                     scroll: false,
                     hover: false,
                 },
-                data: json!({ "text": "left-1" }),
+                content: ItemContent::plain("left-1"),
             },
         ] {
             renderer.render_item(&snapshot).expect("render item");
@@ -3055,7 +3052,6 @@ mod tests {
             label: None,
             icon: Some("cpu".into()),
             placement: Some("left".into()),
-            text: "9%".into(),
             hover: None,
             interactive: InteractiveSnapshot {
                 click: false,
@@ -3063,7 +3059,7 @@ mod tests {
                 scroll: false,
                 hover: false,
             },
-            data: json!({ "text": "9%", "usage_percent": 9 }),
+            content: ItemContent::plain("9%"),
         };
         let gpu = RenderItemSnapshot {
             id: "gpu".into(),
@@ -3071,7 +3067,6 @@ mod tests {
             label: None,
             icon: Some("gpu".into()),
             placement: Some("left".into()),
-            text: "27%".into(),
             hover: None,
             interactive: InteractiveSnapshot {
                 click: false,
@@ -3079,7 +3074,7 @@ mod tests {
                 scroll: false,
                 hover: false,
             },
-            data: json!({ "text": "27%", "utilization_percent": 27 }),
+            content: ItemContent::plain("27%"),
         };
 
         renderer.render_item(&cpu).expect("render cpu");
@@ -3094,8 +3089,7 @@ mod tests {
             .x;
 
         let mut updated_cpu = cpu;
-        updated_cpu.text = "10%".into();
-        updated_cpu.data = json!({ "text": "10%", "usage_percent": 10 });
+        updated_cpu.content = ItemContent::plain("10%");
         renderer.render_item(&updated_cpu).expect("update cpu");
 
         let updated_gpu_x = renderer
@@ -3153,7 +3147,8 @@ mod tests {
                 .find(|item| item.snapshot.id == "b")
                 .expect("retained item")
                 .snapshot
-                .text,
+                .content
+                .text(),
             "B2"
         );
     }
@@ -3166,7 +3161,6 @@ mod tests {
             label: None,
             icon: Some("spaces".into()),
             placement: Some("left".into()),
-            text: "1 2 3".into(),
             hover: None,
             interactive: InteractiveSnapshot {
                 click: false,
@@ -3174,14 +3168,17 @@ mod tests {
                 scroll: false,
                 hover: false,
             },
-            data: json!({
-                "text": "1 2 3",
-                "workspaces": [
-                    { "name": "1", "is_current": true, "has_windows": true },
-                    { "name": "2", "is_current": false, "has_windows": true },
-                    { "name": "3", "is_current": false, "has_windows": false }
-                ]
-            }),
+            content: ItemContent::Workspaces {
+                current: "1".into(),
+                workspaces: [("1", true, 2), ("2", false, 1), ("3", false, 0)]
+                    .into_iter()
+                    .map(|(name, is_current, window_count)| Workspace {
+                        name: name.into(),
+                        is_current,
+                        window_count,
+                    })
+                    .collect(),
+            },
         };
 
         let width = super::measure_item_width(&snapshot);
@@ -3219,7 +3216,6 @@ mod tests {
                 label: Some("time".into()),
                 icon: None,
                 placement: Some("right".into()),
-                text: "12:34".into(),
                 hover: Some(HoverSurface {
                     tooltip: Some("Current time".into()),
                     detail: Some("Thursday".into()),
@@ -3230,7 +3226,7 @@ mod tests {
                     scroll: false,
                     hover: true,
                 },
-                data: json!({ "text": "12:34" }),
+                content: ItemContent::plain("12:34"),
             })
             .expect("render");
         renderer
@@ -3325,7 +3321,6 @@ mod tests {
                     label: Some("CPU".into()),
                     icon: None,
                     placement: Some("left".into()),
-                    text: "10%".into(),
                     hover: Some(HoverSurface {
                         tooltip: Some("CPU".into()),
                         detail: Some("Usage".into()),
@@ -3336,7 +3331,7 @@ mod tests {
                         scroll: false,
                         hover: true,
                     },
-                    data: json!({ "text": "10%" }),
+                    content: ItemContent::plain("10%"),
                 },
                 frame: super::ItemFrame {
                     x: 10.0,

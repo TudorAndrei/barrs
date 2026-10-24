@@ -16,3 +16,12 @@ snapshot (workspaces or layout). _Avoid_: Rift item.
 
 **Label source**: an item source with no plugin; the item shows its label, or
 its id, and its icon. _Avoid_: static item, plain item.
+
+**Item content**: what one bar item shows (`ItemContent`): text with optional
+data fields, the Rift workspaces, or unavailable. Item sources produce it and
+the renderer draws it; `dump-state` shows its JSON form as the item data.
+_Avoid_: snapshot data, payload.
+
+**Unavailable content**: item content for a source that cannot report a value
+now; it shows the placeholder text and has `available = false` in its data.
+_Avoid_: error item, empty item.

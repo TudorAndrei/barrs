@@ -29,12 +29,15 @@ reloads, renderer events, and the latest item snapshots. Each item has a typed
 item source, `src/source.rs#enum:ItemSource`: a system plugin, a Rift plugin,
 a Lua update function, or a fixed label. The daemon asks the source for its
 default refresh interval, whether it reads a Rift snapshot, its Lua update
-function, and its current JSON data; it does not match on plugin kinds. System
-and Rift sources read their data through `src/plugin.rs`. The daemon
-transforms that data into renderer snapshots through `src/render.rs`. Lua
-updates run on the Lua executor. The native renderer is
-macOS/AppKit-specific and is intentionally current-thread only; the noop
-renderer supports tests and non-visual operation.
+function, and its current item content; it does not match on plugin kinds.
+System and Rift sources read their data through `src/plugin.rs`. Item content,
+`src/content.rs#enum:ItemContent`, is text, Rift workspaces, or unavailable;
+the renderer picks the item layout from that variant, not from JSON keys, and
+`dump-state` shows its JSON form. The daemon transforms that content into
+renderer snapshots through `src/render.rs`. Lua updates run on the Lua
+executor and always return text content, or fail to unavailable content. The
+native renderer is macOS/AppKit-specific and is intentionally current-thread
+only; the noop renderer supports tests and non-visual operation.
 
 The daemon directly owns its state. Its event loop processes stateful requests
 and results in order. Connection tasks parse requests, the blocking snapshot
@@ -75,6 +78,7 @@ bounded child-process execution for platform queries and the CLI fallback.
 - Framed Unix-socket protocol: `src/ipc.rs`
 - Item sources and their refresh policy: `src/source.rs`
 - Built-in system and Rift snapshot data: `src/plugin.rs`
+- Item content shared by producers and the renderer: `src/content.rs`
 - Rendering model and native AppKit host: `src/render.rs`
 - Rift backends and event application: `src/rift.rs`
 - Timed subprocess helper: `src/process.rs`

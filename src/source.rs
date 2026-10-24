@@ -6,9 +6,10 @@
 
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::config::{PluginBinding, PluginKind};
+use crate::content::ItemContent;
 use crate::error::BarrsError;
 use crate::plugin;
 use crate::rift::{RiftBackendKind, RiftSnapshot};
@@ -139,7 +140,7 @@ impl ItemSource {
     /// The global Lua function that produces the data, for a Lua source.
     ///
     /// The daemon sends this function to the Lua executor instead of calling
-    /// [`Self::snapshot_data`].
+    /// [`Self::content`].
     #[must_use]
     pub fn lua_update(&self) -> Option<&str> {
         match self {
@@ -148,17 +149,17 @@ impl ItemSource {
         }
     }
 
-    /// Produces the snapshot data that the daemon can show now.
+    /// Produces the content that the daemon can show now.
     ///
-    /// A Lua source returns the unavailable placeholder, which stays until
-    /// the executor returns the first update. A Rift source without `rift`
-    /// also returns the placeholder.
+    /// A Lua source returns unavailable content, which stays until the
+    /// executor returns the first update. A Rift source without `rift` also
+    /// returns unavailable content.
     ///
     /// # Errors
     ///
     /// Returns an error when the local time or date cannot be formatted.
-    pub fn snapshot_data(&self, rift: Option<&RiftSnapshot>) -> Result<Value, BarrsError> {
-        let data = match self {
+    pub fn content(&self, rift: Option<&RiftSnapshot>) -> Result<ItemContent, BarrsError> {
+        let content = match self {
             Self::System(SystemPlugin::Cpu) => plugin::cpu(),
             Self::System(SystemPlugin::Time) => plugin::time()?,
             Self::System(SystemPlugin::Date { format }) => plugin::date(format)?,
@@ -166,10 +167,12 @@ impl ItemSource {
             Self::System(SystemPlugin::Gpu) => plugin::gpu(),
             Self::Rift(RiftPlugin::Workspaces) => plugin::rift_workspaces(rift),
             Self::Rift(RiftPlugin::Layout) => plugin::rift_layout(rift),
-            Self::Lua { .. } => plugin::unavailable_snapshot(),
-            Self::Label { text, icon } => json!({ "text": text, "icon": icon }),
+            Self::Lua { .. } => ItemContent::Unavailable,
+            Self::Label { text, icon } => {
+                ItemContent::plain_with_fields(text.clone(), [("icon", json!(icon))])
+            }
         };
-        Ok(data)
+        Ok(content)
     }
 }
 
@@ -180,6 +183,7 @@ mod tests {
     use serde_json::json;
 
     use crate::config::{PluginBinding, PluginKind};
+    use crate::content::{ItemContent, Workspace};
     use crate::error::BarrsError;
     use crate::rift::{RiftBackendKind, RiftSnapshot, RiftWorkspace};
 
@@ -382,15 +386,14 @@ mod tests {
 
     #[test]
     fn placeholder_sources_report_unavailable() {
-        let unavailable = json!({ "text": "—", "available": false });
         for source in [
             lua(),
             ItemSource::Rift(RiftPlugin::Workspaces),
             ItemSource::Rift(RiftPlugin::Layout),
         ] {
             assert_eq!(
-                source.snapshot_data(None).expect("data"),
-                unavailable,
+                source.content(None).expect("content"),
+                ItemContent::Unavailable,
                 "{source:?}"
             );
         }
@@ -399,28 +402,30 @@ mod tests {
     #[test]
     fn label_source_shows_its_text_and_icon() {
         assert_eq!(
-            label_with_icon().snapshot_data(None).expect("data"),
-            json!({ "text": "label", "icon": "icon" })
+            label_with_icon().content(None).expect("content"),
+            ItemContent::plain_with_fields("label", [("icon", json!("icon"))])
         );
     }
 
     #[test]
     fn system_sources_report_current_values() {
         let cpu = ItemSource::System(SystemPlugin::Cpu)
-            .snapshot_data(None)
-            .expect("cpu");
+            .content(None)
+            .expect("cpu")
+            .data();
         let text = cpu["text"].as_str().expect("cpu text");
         assert!(text.ends_with('%') || text == "—");
 
         let time = ItemSource::System(SystemPlugin::Time)
-            .snapshot_data(None)
-            .expect("time");
+            .content(None)
+            .expect("time")
+            .data();
         let text = time["text"].as_str().expect("time text");
         assert_eq!(text.len(), 5);
         assert_eq!(text.chars().nth(2), Some(':'));
         assert_eq!(time["timezone"], "local");
 
-        let date = date("%Y").snapshot_data(None).expect("date");
+        let date = date("%Y").content(None).expect("date").data();
         let text = date["text"].as_str().expect("date text");
         assert_eq!(text.len(), 4);
         assert!(text.chars().all(|ch| ch.is_ascii_digit()));
@@ -431,7 +436,7 @@ mod tests {
     #[test]
     fn date_source_returns_formatting_error() {
         let error = date(&"x".repeat(256))
-            .snapshot_data(None)
+            .content(None)
             .expect_err("format exceeds output buffer");
         assert!(matches!(
             error,
@@ -458,19 +463,29 @@ mod tests {
             window_count: 4,
         };
 
-        let workspaces = ItemSource::Rift(RiftPlugin::Workspaces)
-            .snapshot_data(Some(&rift))
-            .expect("workspaces");
-        assert_eq!(workspaces["current_workspace"], "2");
-        assert_eq!(workspaces["text"], "1 2 3");
-        assert_eq!(workspaces["workspaces"][0]["has_windows"], true);
-        assert_eq!(workspaces["workspaces"][0]["window_count"], 3);
-        assert_eq!(workspaces["workspaces"][1]["is_current"], true);
-        assert_eq!(workspaces["workspaces"][2]["has_windows"], false);
-
-        let layout = ItemSource::Rift(RiftPlugin::Layout)
-            .snapshot_data(Some(&rift))
-            .expect("layout");
-        assert_eq!(layout, json!({ "text": "bsp", "window_count": 4 }));
+        let entry = |name: &str, is_current, window_count| Workspace {
+            name: name.into(),
+            is_current,
+            window_count,
+        };
+        assert_eq!(
+            ItemSource::Rift(RiftPlugin::Workspaces)
+                .content(Some(&rift))
+                .expect("workspaces"),
+            ItemContent::Workspaces {
+                current: "2".into(),
+                workspaces: vec![
+                    entry("1", false, 3),
+                    entry("2", true, 4),
+                    entry("3", false, 0),
+                ],
+            }
+        );
+        assert_eq!(
+            ItemSource::Rift(RiftPlugin::Layout)
+                .content(Some(&rift))
+                .expect("layout"),
+            ItemContent::plain_with_fields("bsp", [("window_count", json!(4))])
+        );
     }
 }

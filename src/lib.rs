@@ -1,6 +1,7 @@
 pub mod app;
 pub mod cli;
 pub mod config;
+pub mod content;
 pub mod daemon;
 pub mod error;
 pub mod ipc;

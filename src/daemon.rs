@@ -11,12 +11,12 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{self, Duration, Instant};
 
 use crate::config::{Config, ItemConfig};
+use crate::content::ItemContent;
 use crate::error::BarrsError;
 use crate::ipc::{
     EventPayload, Request, Response, read_request_frame, send_request, write_response,
 };
 use crate::lua_executor::{LuaExecutor, UpdateResult};
-use crate::plugin::unavailable_snapshot;
 use crate::render::{RenderItemSnapshot, Renderer};
 use crate::rift::{
     RiftApplyResult, RiftBackendKind, RiftSnapshot, RiftSubscription, apply_event, select_backend,
@@ -423,11 +423,11 @@ impl<R: Renderer> Daemon<R> {
         else {
             return Ok(());
         };
-        let data = update.outcome.unwrap_or_else(|error| {
+        let content = update.outcome.unwrap_or_else(|error| {
             eprintln!("barrs: lua update for {} failed: {error}", update.item_id);
-            unavailable_snapshot()
+            ItemContent::Unavailable
         });
-        let snapshot = RenderItemSnapshot::from_item_config(item, order, data);
+        let snapshot = RenderItemSnapshot::from_item_config(item, order, content);
         let now = Instant::now();
         advance_refresh_deadlines(
             &mut state.refresh_deadlines,
@@ -811,8 +811,8 @@ fn snapshot_for_item(
     order: usize,
     rift_snapshot: Option<&RiftSnapshot>,
 ) -> Result<RenderItemSnapshot, BarrsError> {
-    let data = item.source.snapshot_data(rift_snapshot)?;
-    Ok(RenderItemSnapshot::from_item_config(item, order, data))
+    let content = item.source.content(rift_snapshot)?;
+    Ok(RenderItemSnapshot::from_item_config(item, order, content))
 }
 
 async fn invoke_lua_handler(
@@ -1695,7 +1695,7 @@ return {{
             "1"
         );
         daemon.refresh_all_items().expect("initial render");
-        assert_eq!(daemon.state.item_states["generation"].text, "1");
+        assert_eq!(daemon.state.item_states["generation"].content.text(), "1");
         daemon
             .dispatch_event(crate::ipc::EventPayload::from_trigger(
                 "generation".into(),
@@ -1710,7 +1710,7 @@ return {{
             fs::read_to_string(&evaluation_path).expect("evaluation"),
             "2"
         );
-        assert_eq!(daemon.state.item_states["generation"].text, "2");
+        assert_eq!(daemon.state.item_states["generation"].content.text(), "2");
         daemon
             .dispatch_event(crate::ipc::EventPayload::from_trigger(
                 "generation".into(),
