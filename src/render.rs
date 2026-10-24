@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+use std::cell::RefCell;
 use std::collections::HashMap;
 #[cfg(target_os = "macos")]
 use std::ffi::c_void;
@@ -723,6 +725,8 @@ struct AppKitHost {
     pointer_item: Option<String>,
     background: Option<String>,
     current_screen_signature: Option<ScreenSignature>,
+    /// The bar screen geometry; a display reconfiguration clears it.
+    screen_geometry: RefCell<Option<ScreenGeometry>>,
     display_reconfiguration_pending: Option<Box<AtomicBool>>,
     display_reconfiguration_deadline: Option<Instant>,
     display_reconfiguration_rebuilds_remaining: u8,
@@ -750,10 +754,11 @@ impl NativeHost for AppKitHost {
         config: &Config,
         _bar_height: f64,
     ) -> Result<LayoutGeometry, BarrsError> {
-        let mtm = main_thread_marker()?;
-        Ok(objc2::rc::autoreleasepool(|_| {
-            bar_screen_layout_geometry(config, mtm)
-        }))
+        Ok(self
+            .bar_screen_geometry()?
+            .map_or_else(LayoutGeometry::default, |screen| {
+                screen_layout_geometry(config, &screen)
+            }))
     }
 
     fn present(&mut self, scene: &BarScene) -> Result<(), BarrsError> {
@@ -788,6 +793,7 @@ impl AppKitHost {
         let reconfiguration_rebuild_due = self.display_reconfiguration_rebuild_due();
         if screen_changed || reconfiguration_rebuild_due {
             if reconfiguration_rebuild_due {
+                self.screen_geometry.replace(None);
                 self.invalidate_native_window("display-reconfiguration-rebuild");
             }
             if let Some(scene) = self.last_scene.clone() {
@@ -899,6 +905,7 @@ impl AppKitHost {
         }
 
         debug_display_state("display-reconfiguration-callback", None);
+        self.screen_geometry.replace(None);
         self.invalidate_native_window("display-reconfiguration-start");
         self.display_reconfiguration_rebuilds_remaining = DISPLAY_RECONFIGURATION_REBUILDS;
         self.display_reconfiguration_deadline =
@@ -938,8 +945,30 @@ impl AppKitHost {
         self.current_screen_signature = None;
     }
 
+    /// The geometry of the screen that shows the bar.
+    ///
+    /// Only a display reconfiguration changes it, so the first lookup after
+    /// one is kept until the next.
+    fn bar_screen_geometry(&self) -> Result<Option<ScreenGeometry>, BarrsError> {
+        if let Some(screen) = self.screen_geometry.borrow().as_ref() {
+            return Ok(Some(screen.clone()));
+        }
+        let mtm = main_thread_marker()?;
+        let screen = objc2::rc::autoreleasepool(|_| {
+            bar_screen(mtm).map(|screen| appkit_screen_geometry(&screen))
+        });
+        self.screen_geometry.replace(screen.clone());
+        Ok(screen)
+    }
+
+    fn target_screen_signature(&self) -> Result<Option<ScreenSignature>, BarrsError> {
+        Ok(self
+            .bar_screen_geometry()?
+            .map(|screen| ScreenSignature::from(&screen)))
+    }
+
     fn prepare_for_target_display(&mut self) -> Result<(), BarrsError> {
-        let target_screen_signature = target_screen_signature()?;
+        let target_screen_signature = self.target_screen_signature()?;
         if self.current_screen_signature == target_screen_signature {
             return Ok(());
         }
@@ -950,7 +979,7 @@ impl AppKitHost {
     }
 
     fn target_screen_changed(&self) -> Result<bool, BarrsError> {
-        Ok(self.current_screen_signature != target_screen_signature()?)
+        Ok(self.current_screen_signature != self.target_screen_signature()?)
     }
 
     fn pump_events(&mut self) {
@@ -1577,20 +1606,6 @@ fn bar_screen(mtm: MainThreadMarker) -> Option<objc2::rc::Retained<NSScreen>> {
     }
 
     NSScreen::mainScreen(mtm).or_else(|| screens.firstObject())
-}
-
-#[cfg(target_os = "macos")]
-fn target_screen_signature() -> Result<Option<ScreenSignature>, BarrsError> {
-    let mtm = main_thread_marker()?;
-    Ok(bar_screen(mtm).map(|screen| ScreenSignature::from(&appkit_screen_geometry(&screen))))
-}
-
-#[cfg(target_os = "macos")]
-fn bar_screen_layout_geometry(config: &Config, mtm: MainThreadMarker) -> LayoutGeometry {
-    let Some(screen) = bar_screen(mtm) else {
-        return LayoutGeometry::default();
-    };
-    screen_layout_geometry(config, &appkit_screen_geometry(&screen))
 }
 
 #[derive(Debug, Clone)]
