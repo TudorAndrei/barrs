@@ -10,13 +10,13 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{self, Duration, Instant};
 
-use crate::config::{Config, ItemConfig, PluginKind};
+use crate::config::{Config, ItemConfig};
 use crate::error::BarrsError;
 use crate::ipc::{
     EventPayload, Request, Response, read_request_frame, send_request, write_response,
 };
 use crate::lua_executor::{LuaExecutor, UpdateResult};
-use crate::plugin::{from_item_config, unavailable_snapshot};
+use crate::plugin::unavailable_snapshot;
 use crate::render::{RenderItemSnapshot, Renderer};
 use crate::rift::{
     RiftApplyResult, RiftBackendKind, RiftSnapshot, RiftSubscription, apply_event, select_backend,
@@ -334,7 +334,10 @@ impl<R: Renderer> Daemon<R> {
         let (lua_items, due_items): (Vec<String>, Vec<String>) =
             due_item_ids(&self.state.refresh_deadlines, now)
                 .into_iter()
-                .partition(|item_id| lua_update_function(&self.state.config, item_id).is_some());
+                .partition(|item_id| {
+                    item_by_id(&self.state.config, item_id)
+                        .is_some_and(|item| item.source.lua_update().is_some())
+                });
         self.request_lua_updates(&lua_items);
 
         if !can_start_refresh(self.pending_refresh.is_some(), &due_items) {
@@ -344,7 +347,9 @@ impl<R: Renderer> Daemon<R> {
         let config = self.state.config.clone();
         let epoch = self.state.config_epoch;
         let cached_rift_snapshot = self.state.rift_snapshot.clone();
-        let needs_rift = refresh_needs_rift(&config, &due_items);
+        let needs_rift = due_items.iter().any(|item_id| {
+            item_by_id(&config, item_id).is_some_and(|item| item.source.needs_rift())
+        });
         self.pending_refresh = Some(tokio::task::spawn_blocking(move || {
             let rift_snapshot = if needs_rift {
                 select_backend().snapshot().ok().or(cached_rift_snapshot)
@@ -380,7 +385,9 @@ impl<R: Renderer> Daemon<R> {
         let requested: Vec<&String> =
             updates_to_request(due_items, &state.updates_in_flight).collect();
         for item_id in requested {
-            let Some(function) = lua_update_function(&state.config, item_id) else {
+            let Some(function) =
+                item_by_id(&state.config, item_id).and_then(|item| item.source.lua_update())
+            else {
                 continue;
             };
             match state.lua.request_update(
@@ -514,7 +521,7 @@ impl<R: Renderer> Daemon<R> {
             .config
             .items
             .iter()
-            .filter(|item| is_rift_item(item))
+            .filter(|item| item.source.needs_rift())
             .map(|item| item.id.clone())
             .collect::<Vec<_>>();
 
@@ -583,22 +590,21 @@ impl<R: Renderer> Daemon<R> {
                 | crate::ipc::EventKind::HoverLeave
                 | crate::ipc::EventKind::HoverUpdate
         ) {
-            if is_lua_item(item) {
+            if item.source.lua_update().is_some() {
                 // A handler can change the state an update function reads, so update at once.
                 state
                     .refresh_deadlines
                     .insert(item.id.clone(), Instant::now());
-            }
-            let fresh_rift_snapshot = if is_rift_item(item) {
-                select_backend().snapshot().ok()
             } else {
-                None
-            };
-            let rift_snapshot = fresh_rift_snapshot
-                .as_ref()
-                .or(state.rift_snapshot.as_ref());
-            if let Some(data) = from_item_config(item, rift_snapshot)? {
-                let snapshot = RenderItemSnapshot::from_item_config(item, order, data);
+                let fresh_rift_snapshot = if item.source.needs_rift() {
+                    select_backend().snapshot().ok()
+                } else {
+                    None
+                };
+                let rift_snapshot = fresh_rift_snapshot
+                    .as_ref()
+                    .or(state.rift_snapshot.as_ref());
+                let snapshot = snapshot_for_item(item, order, rift_snapshot)?;
                 state.renderer.render_item(&snapshot)?;
                 state.item_states.insert(item.id.clone(), snapshot);
             }
@@ -680,7 +686,7 @@ fn build_refresh_deadlines(
         .items
         .iter()
         .filter_map(|item| {
-            if is_lua_item(item) {
+            if item.source.lua_update().is_some() {
                 // Lua items show a placeholder until their first update, so run it at once.
                 return Some((item.id.clone(), now));
             }
@@ -759,37 +765,11 @@ fn rift_signature_changed(last_signature: Option<u64>, next_signature: u64) -> b
 fn item_refresh_interval(item: &ItemConfig, backend: RiftBackendKind) -> Option<Duration> {
     item.interval
         .map(|interval| Duration::from_secs(interval.max(1)))
-        .or_else(|| match item.plugin.as_ref().map(|plugin| plugin.kind) {
-            Some(PluginKind::Time) => Some(Duration::from_secs(1)),
-            Some(PluginKind::Date) => Some(Duration::from_mins(30)),
-            Some(PluginKind::Cpu | PluginKind::Gpu) => Some(Duration::from_secs(2)),
-            Some(PluginKind::Battery) => Some(Duration::from_secs(10)),
-            Some(PluginKind::Lua) => Some(Duration::from_secs(5)),
-            Some(PluginKind::RiftWorkspaces | PluginKind::RiftLayout) => {
-                if backend == RiftBackendKind::Cli {
-                    Some(Duration::from_millis(250))
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        })
+        .or_else(|| item.source.default_interval(backend))
 }
 
-fn is_lua_item(item: &ItemConfig) -> bool {
-    item.plugin
-        .as_ref()
-        .is_some_and(|plugin| plugin.kind == PluginKind::Lua)
-}
-
-fn lua_update_function<'a>(config: &'a Config, item_id: &str) -> Option<&'a str> {
-    config
-        .items
-        .iter()
-        .find(|item| item.id == item_id)
-        .and_then(|item| item.plugin.as_ref())
-        .filter(|plugin| plugin.kind == PluginKind::Lua)
-        .and_then(|plugin| plugin.update.as_deref())
+fn item_by_id<'a>(config: &'a Config, item_id: &str) -> Option<&'a ItemConfig> {
+    config.items.iter().find(|item| item.id == item_id)
 }
 
 fn updates_to_request<'a>(
@@ -801,32 +781,17 @@ fn updates_to_request<'a>(
         .filter(|item_id| !in_flight.contains(*item_id))
 }
 
-fn is_rift_item(item: &ItemConfig) -> bool {
-    matches!(
-        item.plugin.as_ref().map(|plugin| plugin.kind),
-        Some(PluginKind::RiftWorkspaces | PluginKind::RiftLayout)
-    )
-}
-
 fn rift_subscription_for(config: &Config) -> Option<RiftSubscription> {
     has_rift_items(config).then(subscribe).flatten()
 }
 
 fn has_rift_items(config: &Config) -> bool {
-    config.items.iter().any(is_rift_item)
+    config.items.iter().any(|item| item.source.needs_rift())
 }
 
 const fn finish_rift_debounce<R: Renderer>(state: &mut DaemonState<R>) {
     state.rift_dirty = false;
     state.rift_debounce_deadline = None;
-}
-
-fn refresh_needs_rift(config: &Config, due_items: &[String]) -> bool {
-    config
-        .items
-        .iter()
-        .filter(|item| due_items.iter().any(|item_id| item_id == &item.id))
-        .any(is_rift_item)
 }
 
 fn snapshots_for_config(
@@ -846,25 +811,8 @@ fn snapshot_for_item(
     order: usize,
     rift_snapshot: Option<&RiftSnapshot>,
 ) -> Result<RenderItemSnapshot, BarrsError> {
-    if is_lua_item(item) {
-        return Ok(RenderItemSnapshot::from_item_config(
-            item,
-            order,
-            unavailable_snapshot(),
-        ));
-    }
-    if let Some(data) = from_item_config(item, rift_snapshot)? {
-        return Ok(RenderItemSnapshot::from_item_config(item, order, data));
-    }
-
-    Ok(RenderItemSnapshot::from_item_config(
-        item,
-        order,
-        json!({
-            "text": item.label.clone().unwrap_or_else(|| item.id.clone()),
-            "icon": item.icon,
-        }),
-    ))
+    let data = item.source.snapshot_data(rift_snapshot)?;
+    Ok(RenderItemSnapshot::from_item_config(item, order, data))
 }
 
 async fn invoke_lua_handler(
@@ -902,9 +850,10 @@ mod tests {
     use tokio::net::UnixStream;
     use tokio::task::JoinHandle;
 
-    use crate::config::{Config, ItemConfig, ItemHandlers, PluginBinding, PluginKind, load_config};
+    use crate::config::{Config, ItemConfig, ItemHandlers, load_config};
     use crate::ipc::{Request, Response, default_socket_path, send_request};
     use crate::render::{NativeRenderer, NoopRenderer, Renderer};
+    use crate::source::{ItemSource, SystemPlugin};
 
     use super::Daemon;
 
@@ -2062,8 +2011,8 @@ return {{
             socket_path: None,
             bar: crate::config::BarConfig::default(),
             items: vec![
-                scheduled_item("due", PluginKind::Time),
-                scheduled_item("failed", PluginKind::Time),
+                scheduled_item("due", ItemSource::System(SystemPlugin::Time)),
+                scheduled_item("failed", ItemSource::System(SystemPlugin::Time)),
             ],
         };
         // A partial snapshot failure still advances every attempted item's deadline,
@@ -2282,173 +2231,29 @@ return {{
         assert_eq!(fs::read_to_string(&marker_path).expect("marker"), "2");
     }
 
-    #[test]
-    fn rift_items_poll_only_on_cli_backend() {
-        let item = crate::config::ItemConfig {
-            id: "workspaces".into(),
-            label: None,
-            icon: None,
-            placement: None,
-            interval: None,
-            plugin: Some(crate::config::PluginBinding {
-                kind: crate::config::PluginKind::RiftWorkspaces,
-                format: None,
-                update: None,
-            }),
-            hover: None,
-            handlers: crate::config::ItemHandlers::default(),
-        };
-
-        assert_eq!(
-            super::item_refresh_interval(&item, crate::rift::RiftBackendKind::Cli),
-            Some(std::time::Duration::from_millis(250))
-        );
-        assert_eq!(
-            super::item_refresh_interval(&item, crate::rift::RiftBackendKind::Mach),
-            None
-        );
-    }
-
-    #[test]
-    fn builtin_items_use_default_intervals() {
-        let make_item = |kind| crate::config::ItemConfig {
-            id: "item".into(),
-            label: None,
-            icon: None,
-            placement: None,
-            interval: None,
-            plugin: Some(crate::config::PluginBinding {
-                kind,
-                format: None,
-                update: None,
-            }),
-            hover: None,
-            handlers: crate::config::ItemHandlers::default(),
-        };
-
-        assert_eq!(
-            super::item_refresh_interval(
-                &make_item(crate::config::PluginKind::Time),
-                crate::rift::RiftBackendKind::Mach
-            ),
-            Some(std::time::Duration::from_secs(1))
-        );
-        assert_eq!(
-            super::item_refresh_interval(
-                &make_item(crate::config::PluginKind::Cpu),
-                crate::rift::RiftBackendKind::Mach
-            ),
-            Some(std::time::Duration::from_secs(2))
-        );
-        assert_eq!(
-            super::item_refresh_interval(
-                &make_item(crate::config::PluginKind::Gpu),
-                crate::rift::RiftBackendKind::Mach
-            ),
-            Some(std::time::Duration::from_secs(2))
-        );
-        assert_eq!(
-            super::item_refresh_interval(
-                &make_item(crate::config::PluginKind::Battery),
-                crate::rift::RiftBackendKind::Mach
-            ),
-            Some(std::time::Duration::from_secs(10))
-        );
-        assert_eq!(
-            super::item_refresh_interval(
-                &make_item(crate::config::PluginKind::Date),
-                crate::rift::RiftBackendKind::Mach
-            ),
-            Some(std::time::Duration::from_mins(30))
-        );
-    }
-
-    #[test]
-    fn identifies_rift_items() {
-        let make_item = |kind| ItemConfig {
-            id: "item".into(),
-            label: None,
-            icon: None,
-            placement: None,
-            interval: None,
-            plugin: Some(PluginBinding {
-                kind,
-                format: None,
-                update: None,
-            }),
-            hover: None,
-            handlers: ItemHandlers::default(),
-        };
-
-        assert!(!super::is_rift_item(&make_item(PluginKind::Time)));
-        assert!(!super::is_rift_item(&make_item(PluginKind::Cpu)));
-        assert!(!super::is_rift_item(&make_item(PluginKind::Date)));
-        assert!(super::is_rift_item(&make_item(PluginKind::RiftWorkspaces)));
-        assert!(super::is_rift_item(&make_item(PluginKind::RiftLayout)));
-    }
-
-    #[test]
-    fn refresh_needs_rift_only_for_due_rift_items() {
-        let make_item = |id: &str, kind| ItemConfig {
-            id: id.into(),
-            label: None,
-            icon: None,
-            placement: None,
-            interval: None,
-            plugin: Some(PluginBinding {
-                kind,
-                format: None,
-                update: None,
-            }),
-            hover: None,
-            handlers: ItemHandlers::default(),
-        };
-        let config = Config {
-            socket_path: None,
-            bar: crate::config::BarConfig::default(),
-            items: vec![
-                make_item("time", PluginKind::Time),
-                make_item("workspaces", PluginKind::RiftWorkspaces),
-            ],
-        };
-
-        assert!(!super::refresh_needs_rift(&config, &[]));
-        assert!(!super::refresh_needs_rift(&config, &["time".into()]));
-        assert!(super::refresh_needs_rift(&config, &["workspaces".into()]));
-    }
-
-    fn scheduled_item(id: &str, kind: PluginKind) -> ItemConfig {
+    fn scheduled_item(id: &str, source: ItemSource) -> ItemConfig {
         ItemConfig {
             id: id.into(),
             label: None,
             icon: None,
             placement: None,
             interval: None,
-            plugin: Some(PluginBinding {
-                kind,
-                format: None,
-                update: None,
-            }),
+            source,
             hover: None,
             handlers: ItemHandlers::default(),
         }
     }
 
     #[test]
-    fn explicit_interval_overrides_date_default() {
-        let item = crate::config::ItemConfig {
-            id: "date".into(),
-            label: None,
-            icon: None,
-            placement: None,
+    fn explicit_interval_overrides_the_source_default() {
+        let item = ItemConfig {
             interval: Some(7),
-            plugin: Some(crate::config::PluginBinding {
-                kind: crate::config::PluginKind::Date,
-                format: None,
-                update: None,
-            }),
-            hover: None,
-            handlers: crate::config::ItemHandlers::default(),
+            ..scheduled_item(
+                "date",
+                ItemSource::System(SystemPlugin::Date {
+                    format: "%Y".into(),
+                }),
+            )
         };
 
         assert_eq!(

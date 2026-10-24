@@ -25,10 +25,14 @@ signal. `run` loads the Lua configuration, constructs a renderer, and gives both
 to `src/daemon.rs`.
 
 The daemon owns the Unix socket, scheduled plugin refreshes, configuration
-reloads, renderer events, and the latest item snapshots. `src/plugin.rs`
-selects a built-in snapshot from the item's plugin kind and returns JSON data
-directly. The daemon transforms that data into renderer snapshots through
-`src/render.rs`. Lua updates run on the Lua executor. The native renderer is
+reloads, renderer events, and the latest item snapshots. Each item has a typed
+item source, `src/source.rs#enum:ItemSource`: a system plugin, a Rift plugin,
+a Lua update function, or a fixed label. The daemon asks the source for its
+default refresh interval, whether it reads a Rift snapshot, its Lua update
+function, and its current JSON data; it does not match on plugin kinds. System
+and Rift sources read their data through `src/plugin.rs`. The daemon
+transforms that data into renderer snapshots through `src/render.rs`. Lua
+updates run on the Lua executor. The native renderer is
 macOS/AppKit-specific and is intentionally current-thread only; the noop
 renderer supports tests and non-visual operation.
 
@@ -41,9 +45,12 @@ daemon state or retained AppKit objects.
 ## Configuration and interaction
 
 `src/config.rs` evaluates the trusted Lua configuration once, deserializes it
-into the Rust model, checks item IDs and placement, and confirms every
-configured handler name exists in the Lua globals. Items may use built-in system
-plugins, Rift plugins, labels, hover text, and event handlers.
+into a schema document, and converts each item's `plugin` table into an item
+source with `src/source.rs#fn:from_config`. That conversion rejects a Lua
+plugin without `update`, `update` on other kinds, and a date format with NUL.
+It then checks item IDs and placement, and confirms every configured handler
+and update function name exists in the Lua globals. Items may use built-in
+system plugins, Rift plugins, labels, hover text, and event handlers.
 
 `src/ipc.rs` defines the framed request and response protocol used by commands
 such as `stop`, `reload`, `status`, `dump-state`, and `item trigger`.
@@ -66,7 +73,8 @@ bounded child-process execution for platform queries and the CLI fallback.
 - Lua configuration schema and validation: `src/config.rs`
 - Daemon lifecycle, scheduler, and snapshots: `src/daemon.rs`
 - Framed Unix-socket protocol: `src/ipc.rs`
-- Built-in snapshot selection and data: `src/plugin.rs`
+- Item sources and their refresh policy: `src/source.rs`
+- Built-in system and Rift snapshot data: `src/plugin.rs`
 - Rendering model and native AppKit host: `src/render.rs`
 - Rift backends and event application: `src/rift.rs`
 - Timed subprocess helper: `src/process.rs`

@@ -3,13 +3,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
-use crate::config::{ItemConfig, PluginKind};
 use crate::error::BarrsError;
 use crate::process::run_command_with_timeout;
 use crate::rift::RiftSnapshot;
 
 const SYSTEM_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
-const DEFAULT_DATE_FORMAT: &str = "%Y-%m-%d";
 const TIME_FORMAT: &str = "%H:%M";
 const PLACEHOLDER_TEXT: &str = "—";
 
@@ -21,56 +19,70 @@ pub(crate) fn unavailable_snapshot() -> Value {
     })
 }
 
-/// Returns the current built-in snapshot, or `None` for Lua or no plugin.
+/// Current CPU usage, or the unavailable placeholder.
+pub(crate) fn cpu() -> Value {
+    cpu_snapshot_from_top().unwrap_or_else(unavailable_snapshot)
+}
+
+/// Current local time.
 ///
 /// # Errors
 ///
-/// Returns an error when the local time or date cannot be formatted.
-pub fn from_item_config(
-    item: &ItemConfig,
-    rift: Option<&RiftSnapshot>,
-) -> Result<Option<Value>, BarrsError> {
-    let Some(binding) = item.plugin.as_ref() else {
-        return Ok(None);
-    };
-    let snapshot = match binding.kind {
-        PluginKind::Cpu => cpu_snapshot_from_top().unwrap_or_else(unavailable_snapshot),
-        PluginKind::Time => json!({
-            "text": format_local_time(TIME_FORMAT)?,
-            "timezone": "local"
-        }),
-        PluginKind::Date => {
-            let format = binding.format.as_deref().unwrap_or(DEFAULT_DATE_FORMAT);
-            json!({
-                "text": format_local_time(format)?,
-                "timezone": "local",
-                "format": format,
-            })
-        }
-        PluginKind::Battery => battery_snapshot_from_pmset().unwrap_or_else(unavailable_snapshot),
-        PluginKind::Gpu => gpu_snapshot_from_ioreg().unwrap_or_else(unavailable_snapshot),
-        PluginKind::RiftWorkspaces => rift.map_or_else(unavailable_snapshot, |snapshot| {
-            json!({
-                "text": snapshot.workspaces.iter().map(|workspace| workspace.name.as_str()).collect::<Vec<_>>().join(" "),
-                "current_workspace": snapshot.current_workspace,
-                "workspaces": snapshot.workspaces.iter().map(|workspace| json!({
-                    "name": workspace.name,
-                    "is_current": workspace.is_current,
-                    "window_count": workspace.window_count,
-                    "has_windows": workspace.has_windows
-                })).collect::<Vec<_>>(),
-            })
-        }),
-        PluginKind::RiftLayout => rift.map_or_else(unavailable_snapshot, |snapshot| {
-            json!({
-                "text": snapshot.layout,
-                "window_count": snapshot.window_count
-            })
-        }),
-        // The daemon runs Lua update functions on the Lua executor, not as a Rust plugin.
-        PluginKind::Lua => return Ok(None),
-    };
-    Ok(Some(snapshot))
+/// Returns an error when the local time cannot be formatted.
+pub(crate) fn time() -> Result<Value, BarrsError> {
+    Ok(json!({
+        "text": format_local_time(TIME_FORMAT)?,
+        "timezone": "local"
+    }))
+}
+
+/// Current local date in the `strftime` `format`.
+///
+/// # Errors
+///
+/// Returns an error when the local date cannot be formatted.
+pub(crate) fn date(format: &str) -> Result<Value, BarrsError> {
+    Ok(json!({
+        "text": format_local_time(format)?,
+        "timezone": "local",
+        "format": format,
+    }))
+}
+
+/// Current battery charge, or the unavailable placeholder.
+pub(crate) fn battery() -> Value {
+    battery_snapshot_from_pmset().unwrap_or_else(unavailable_snapshot)
+}
+
+/// Current GPU utilization, or the unavailable placeholder.
+pub(crate) fn gpu() -> Value {
+    gpu_snapshot_from_ioreg().unwrap_or_else(unavailable_snapshot)
+}
+
+/// Rift workspaces, or the unavailable placeholder without a snapshot.
+pub(crate) fn rift_workspaces(rift: Option<&RiftSnapshot>) -> Value {
+    rift.map_or_else(unavailable_snapshot, |snapshot| {
+        json!({
+            "text": snapshot.workspaces.iter().map(|workspace| workspace.name.as_str()).collect::<Vec<_>>().join(" "),
+            "current_workspace": snapshot.current_workspace,
+            "workspaces": snapshot.workspaces.iter().map(|workspace| json!({
+                "name": workspace.name,
+                "is_current": workspace.is_current,
+                "window_count": workspace.window_count,
+                "has_windows": workspace.has_windows
+            })).collect::<Vec<_>>(),
+        })
+    })
+}
+
+/// Rift layout, or the unavailable placeholder without a snapshot.
+pub(crate) fn rift_layout(rift: Option<&RiftSnapshot>) -> Value {
+    rift.map_or_else(unavailable_snapshot, |snapshot| {
+        json!({
+            "text": snapshot.layout,
+            "window_count": snapshot.window_count
+        })
+    })
 }
 
 fn cpu_snapshot_from_top() -> Option<Value> {
@@ -215,120 +227,15 @@ fn parse_battery_output(output: &str) -> Option<Value> {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::{ItemConfig, ItemHandlers, PluginBinding, PluginKind};
-    use crate::error::BarrsError;
     use crate::plugin::{
-        from_item_config, parse_battery_output, parse_cpu_output, parse_gpu_output,
-        unavailable_snapshot,
+        parse_battery_output, parse_cpu_output, parse_gpu_output, unavailable_snapshot,
     };
-    use crate::rift::{RiftSnapshot, RiftWorkspace};
-
-    fn item_with_plugin(kind: PluginKind, format: Option<String>) -> ItemConfig {
-        ItemConfig {
-            id: "item".into(),
-            label: None,
-            icon: None,
-            placement: None,
-            interval: Some(1),
-            plugin: Some(PluginBinding {
-                kind,
-                format,
-                update: None,
-            }),
-            hover: None,
-            handlers: ItemHandlers::default(),
-        }
-    }
 
     #[test]
-    fn creates_builtin_snapshot_from_config() {
-        let item = item_with_plugin(PluginKind::Cpu, None);
-        let snapshot = from_item_config(&item, None)
-            .expect("snapshot")
-            .expect("built-in data");
-        let text = snapshot["text"].as_str().expect("text");
-        assert!(text.ends_with('%') || text == super::PLACEHOLDER_TEXT);
-    }
-
-    #[test]
-    fn cpu_plugin_reports_unavailable_without_data() {
+    fn unavailable_snapshot_uses_placeholder_text() {
         let snapshot = unavailable_snapshot();
         assert_eq!(snapshot["text"], super::PLACEHOLDER_TEXT);
         assert_eq!(snapshot["available"], false);
-    }
-
-    #[test]
-    fn rift_workspaces_plugin_reports_unavailable_without_snapshot() {
-        let item = item_with_plugin(PluginKind::RiftWorkspaces, None);
-        let snapshot = from_item_config(&item, None)
-            .expect("snapshot")
-            .expect("built-in data");
-        assert_eq!(snapshot["text"], super::PLACEHOLDER_TEXT);
-        assert_eq!(snapshot["available"], false);
-        assert!(snapshot.get("workspaces").is_none());
-    }
-
-    #[test]
-    fn rift_layout_plugin_reports_unavailable_without_snapshot() {
-        let item = item_with_plugin(PluginKind::RiftLayout, None);
-        let snapshot = from_item_config(&item, None)
-            .expect("snapshot")
-            .expect("built-in data");
-        assert_eq!(snapshot["text"], super::PLACEHOLDER_TEXT);
-        assert_eq!(snapshot["available"], false);
-        assert!(snapshot.get("window_count").is_none());
-    }
-
-    #[test]
-    fn creates_rift_plugin_with_snapshot() {
-        let item = ItemConfig {
-            id: "workspaces".into(),
-            label: None,
-            icon: None,
-            placement: None,
-            interval: Some(1),
-            plugin: Some(PluginBinding {
-                kind: PluginKind::RiftWorkspaces,
-                format: None,
-                update: None,
-            }),
-            hover: None,
-            handlers: ItemHandlers::default(),
-        };
-        let rift = RiftSnapshot {
-            current_workspace: "2".into(),
-            workspaces: vec![
-                RiftWorkspace {
-                    name: "1".into(),
-                    is_current: false,
-                    window_count: 3,
-                    has_windows: true,
-                },
-                RiftWorkspace {
-                    name: "2".into(),
-                    is_current: true,
-                    window_count: 4,
-                    has_windows: true,
-                },
-                RiftWorkspace {
-                    name: "3".into(),
-                    is_current: false,
-                    window_count: 0,
-                    has_windows: false,
-                },
-            ],
-            layout: "bsp".into(),
-            window_count: 4,
-        };
-
-        let snapshot = from_item_config(&item, Some(&rift))
-            .expect("snapshot")
-            .expect("built-in data");
-        assert_eq!(snapshot["current_workspace"], "2");
-        assert_eq!(snapshot["text"], "1 2 3");
-        assert_eq!(snapshot["workspaces"][0]["has_windows"], true);
-        assert_eq!(snapshot["workspaces"][0]["window_count"], 3);
-        assert_eq!(snapshot["workspaces"][1]["is_current"], true);
     }
 
     #[test]
@@ -359,89 +266,5 @@ mod tests {
         .expect("parsed gpu output");
         assert_eq!(snapshot["text"], "40%");
         assert_eq!(snapshot["utilization_percent"], 40);
-    }
-
-    #[test]
-    fn time_plugin_formats_current_time() {
-        let item = ItemConfig {
-            id: "clock".into(),
-            label: None,
-            icon: None,
-            placement: None,
-            interval: Some(1),
-            plugin: Some(PluginBinding {
-                kind: PluginKind::Time,
-                format: None,
-                update: None,
-            }),
-            hover: None,
-            handlers: ItemHandlers::default(),
-        };
-
-        let snapshot = from_item_config(&item, None)
-            .expect("snapshot")
-            .expect("built-in data");
-        let text = snapshot["text"].as_str().expect("time text");
-        assert_eq!(text.len(), 5);
-        assert_eq!(text.chars().nth(2), Some(':'));
-    }
-
-    #[test]
-    fn date_plugin_uses_default_format_from_config() {
-        let item = ItemConfig {
-            id: "date".into(),
-            label: None,
-            icon: None,
-            placement: None,
-            interval: None,
-            plugin: Some(PluginBinding {
-                kind: PluginKind::Date,
-                format: None,
-                update: None,
-            }),
-            hover: None,
-            handlers: ItemHandlers::default(),
-        };
-
-        let snapshot = from_item_config(&item, None)
-            .expect("snapshot")
-            .expect("built-in data");
-        assert_eq!(snapshot["format"], "%Y-%m-%d");
-        assert!(!snapshot["text"].as_str().expect("date text").is_empty());
-    }
-
-    #[test]
-    fn date_plugin_formats_current_date() {
-        let item = item_with_plugin(PluginKind::Date, Some("%Y-%m-%d".into()));
-        let snapshot = from_item_config(&item, None)
-            .expect("snapshot")
-            .expect("built-in data");
-        let text = snapshot["text"].as_str().expect("date text");
-        assert!(!text.is_empty());
-        assert_eq!(snapshot["timezone"], "local");
-        assert_eq!(snapshot["format"], "%Y-%m-%d");
-    }
-
-    #[test]
-    fn date_plugin_uses_known_format() {
-        let item = item_with_plugin(PluginKind::Date, Some("%Y".into()));
-        let snapshot = from_item_config(&item, None)
-            .expect("snapshot")
-            .expect("built-in data");
-        let text = snapshot["text"].as_str().expect("date text");
-        assert_eq!(text.len(), 4);
-        assert!(text.chars().all(|ch| ch.is_ascii_digit()));
-        assert_eq!(snapshot["format"], "%Y");
-    }
-
-    #[test]
-    fn date_plugin_returns_formatting_error() {
-        let item = item_with_plugin(PluginKind::Date, Some("x".repeat(256)));
-
-        let error = from_item_config(&item, None).expect_err("format exceeds output buffer");
-        assert!(matches!(
-            error,
-            BarrsError::Unsupported(message) if message == "failed to format local time"
-        ));
     }
 }

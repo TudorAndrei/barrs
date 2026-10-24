@@ -9,3 +9,4 @@ pub mod plugin;
 mod process;
 pub mod render;
 pub mod rift;
+pub mod source;

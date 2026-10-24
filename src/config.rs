@@ -6,15 +6,41 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::BarrsError;
 use crate::ipc::default_socket_path;
+use crate::source::ItemSource;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Validated configuration in which every item has a typed [`ItemSource`].
+#[derive(Debug, Clone)]
 pub struct Config {
-    #[serde(default)]
     pub socket_path: Option<PathBuf>,
-    #[serde(default)]
     pub bar: BarConfig,
-    #[serde(default)]
     pub items: Vec<ItemConfig>,
+}
+
+/// Lua schema of the whole config, as written in the config.
+#[derive(Deserialize)]
+struct ConfigDocument {
+    #[serde(default)]
+    socket_path: Option<PathBuf>,
+    #[serde(default)]
+    bar: BarConfig,
+    #[serde(default)]
+    items: Vec<ItemDocument>,
+}
+
+impl TryFrom<ConfigDocument> for Config {
+    type Error = BarrsError;
+
+    fn try_from(document: ConfigDocument) -> Result<Self, Self::Error> {
+        Ok(Self {
+            socket_path: document.socket_path,
+            bar: document.bar,
+            items: document
+                .items
+                .into_iter()
+                .map(ItemConfig::try_from)
+                .collect::<Result<_, _>>()?,
+        })
+    }
 }
 
 impl Config {
@@ -101,26 +127,64 @@ impl BarSection {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One bar item after its plugin binding is converted to an [`ItemSource`].
+#[derive(Debug, Clone)]
 pub struct ItemConfig {
     pub id: String,
-    #[serde(default)]
     pub label: Option<String>,
-    #[serde(default)]
     pub icon: Option<String>,
-    #[serde(default)]
     pub placement: Option<String>,
-    #[serde(default, alias = "refresh_secs")]
     pub interval: Option<u64>,
-    #[serde(default)]
-    pub plugin: Option<PluginBinding>,
-    #[serde(default)]
+    pub source: ItemSource,
     pub hover: Option<HoverConfig>,
-    #[serde(default)]
     pub handlers: ItemHandlers,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Lua schema of one item, as written in the config.
+#[derive(Deserialize)]
+struct ItemDocument {
+    id: String,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    icon: Option<String>,
+    #[serde(default)]
+    placement: Option<String>,
+    #[serde(default, alias = "refresh_secs")]
+    interval: Option<u64>,
+    #[serde(default)]
+    plugin: Option<PluginBinding>,
+    #[serde(default)]
+    hover: Option<HoverConfig>,
+    #[serde(default)]
+    handlers: ItemHandlers,
+}
+
+impl TryFrom<ItemDocument> for ItemConfig {
+    type Error = BarrsError;
+
+    fn try_from(document: ItemDocument) -> Result<Self, Self::Error> {
+        let source = ItemSource::from_config(
+            &document.id,
+            document.label.as_deref(),
+            document.icon.as_deref(),
+            document.plugin,
+        )?;
+        Ok(Self {
+            id: document.id,
+            label: document.label,
+            icon: document.icon,
+            placement: document.placement,
+            interval: document.interval,
+            source,
+            hover: document.hover,
+            handlers: document.handlers,
+        })
+    }
+}
+
+/// Lua schema of an item's `plugin` table, before [`ItemSource`] conversion.
+#[derive(Debug, Clone, Deserialize)]
 pub struct PluginBinding {
     pub kind: PluginKind,
     #[serde(default)]
@@ -130,7 +194,7 @@ pub struct PluginBinding {
     pub update: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginKind {
     Cpu,
@@ -177,7 +241,8 @@ pub fn load_config_with_runtime(path: &Path) -> Result<(Config, Lua), BarrsError
     let source = fs::read_to_string(path)?;
     let lua = Lua::new();
     let value: Value = lua.load(&source).set_name(path.to_string_lossy()).eval()?;
-    let mut config: Config = lua.from_value(value)?;
+    let document: ConfigDocument = lua.from_value(value)?;
+    let mut config = Config::try_from(document)?;
     if config.socket_path.is_none() {
         config.socket_path = Some(default_socket_path());
     }
@@ -196,7 +261,7 @@ pub fn load_config(path: &Path) -> Result<Config, BarrsError> {
     load_config_with_runtime(path).map(|(config, _)| config)
 }
 
-/// Checks item ids, placements, and plugin settings.
+/// Checks item ids and placements.
 ///
 /// # Errors
 ///
@@ -231,43 +296,6 @@ pub fn validate_config(config: &Config) -> Result<(), BarrsError> {
             )));
         }
     }
-    for item in &config.items {
-        let Some(plugin) = &item.plugin else {
-            continue;
-        };
-        match (plugin.kind, plugin.update.as_deref()) {
-            (PluginKind::Lua, None) => {
-                return Err(BarrsError::InvalidConfig(format!(
-                    "lua plugin for item {} must set update to a global function name",
-                    item.id
-                )));
-            }
-            (PluginKind::Lua, Some(update)) if update.trim().is_empty() => {
-                return Err(BarrsError::InvalidConfig(format!(
-                    "lua plugin for item {} must not have an empty update",
-                    item.id
-                )));
-            }
-            (kind, Some(_)) if kind != PluginKind::Lua => {
-                return Err(BarrsError::InvalidConfig(format!(
-                    "item {} sets update, which only lua plugins accept",
-                    item.id
-                )));
-            }
-            _ => {}
-        }
-        if plugin.kind == PluginKind::Date
-            && plugin
-                .format
-                .as_ref()
-                .is_some_and(|format| format.contains('\0'))
-        {
-            return Err(BarrsError::InvalidConfig(format!(
-                "date format for item {} must not contain NUL bytes",
-                item.id
-            )));
-        }
-    }
     Ok(())
 }
 
@@ -279,12 +307,8 @@ fn validate_handlers(lua: &Lua, config: &Config) -> Result<(), BarrsError> {
                 .get::<Function>(handler.as_str())
                 .map_err(|_| BarrsError::InvalidConfig(format!("missing handler {handler}")))?;
         }
-        if let Some(update) = item
-            .plugin
-            .as_ref()
-            .and_then(|plugin| plugin.update.as_ref())
-        {
-            globals.get::<Function>(update.as_str()).map_err(|_| {
+        if let Some(update) = item.source.lua_update() {
+            globals.get::<Function>(update).map_err(|_| {
                 BarrsError::InvalidConfig(format!("missing update function {update}"))
             })?;
         }
@@ -314,7 +338,8 @@ mod tests {
     use mlua::LuaSerdeExt;
     use tempfile::tempdir;
 
-    use super::{BarConfig, BarSection, PluginKind, load_config};
+    use super::{BarConfig, BarSection, load_config};
+    use crate::source::{ItemSource, SystemPlugin};
 
     #[test]
     fn loads_lua_config() {
@@ -353,8 +378,8 @@ return {
         assert_eq!(config.bar.notch_offset, 0);
         assert_eq!(config.bar.notch_display_height, 0);
         assert_eq!(
-            config.items[0].plugin.as_ref().expect("plugin").kind,
-            PluginKind::Time
+            config.items[0].source,
+            ItemSource::System(SystemPlugin::Time)
         );
     }
 
@@ -464,23 +489,13 @@ return {
         .expect("write config");
 
         let config = load_config(&path).expect("lua plugin should load");
-        let plugin = config.items[0].plugin.as_ref().expect("plugin");
-        assert_eq!(plugin.kind, PluginKind::Lua);
-        assert_eq!(plugin.update.as_deref(), Some("memory_usage"));
+        assert_eq!(config.items[0].source.lua_update(), Some("memory_usage"));
     }
 
     #[test]
-    fn rejects_invalid_lua_plugin_bindings() {
+    fn rejects_lua_plugins_without_a_usable_update_function() {
         let cases = [
             (r#"{ kind = "lua" }"#, "must set update"),
-            (
-                r#"{ kind = "lua", update = " " }"#,
-                "must not have an empty update",
-            ),
-            (
-                r#"{ kind = "cpu", update = "memory_usage" }"#,
-                "only lua plugins accept",
-            ),
             (
                 r#"{ kind = "lua", update = "missing" }"#,
                 "missing update function missing",
@@ -619,57 +634,11 @@ return {
         .expect("write config");
 
         let config = load_config(&path).expect("date config should load");
-        let plugin = config.items[0].plugin.as_ref().expect("plugin");
-        assert_eq!(plugin.kind, PluginKind::Date);
-        assert_eq!(plugin.format.as_deref(), Some("%Y-%m-%d"));
-    }
-
-    #[test]
-    fn loads_date_plugin_without_format() {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("barrs.lua");
-        fs::write(
-            &path,
-            r#"
-return {
-  items = {
-    {
-      id = "date",
-      plugin = { kind = "date" }
-    }
-  }
-}
-"#,
-        )
-        .expect("write config");
-
-        let config = load_config(&path).expect("date config should load");
-        let plugin = config.items[0].plugin.as_ref().expect("plugin");
-        assert_eq!(plugin.kind, PluginKind::Date);
-        assert!(plugin.format.is_none());
-    }
-
-    #[test]
-    fn rejects_date_format_with_nul_byte() {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("barrs.lua");
-        fs::write(
-            &path,
-            r#"
-return {
-  items = {
-    {
-      id = "date",
-      plugin = { kind = "date", format = "%Y\0%m" }
-    }
-  }
-}
-"#,
-        )
-        .expect("write config");
-
-        let error = load_config(&path).expect_err("NUL date format should fail");
-        assert!(error.to_string().contains("date format"));
-        assert!(error.to_string().contains("NUL"));
+        assert_eq!(
+            config.items[0].source,
+            ItemSource::System(SystemPlugin::Date {
+                format: "%Y-%m-%d".into()
+            })
+        );
     }
 }

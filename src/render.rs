@@ -2308,7 +2308,10 @@ mod tests {
                     icon: None,
                     placement: Some("left".into()),
                     interval: None,
-                    plugin: None,
+                    source: crate::source::ItemSource::Label {
+                        text: (*id).into(),
+                        icon: None,
+                    },
                     hover: None,
                     handlers: ItemHandlers::default(),
                 })
@@ -2347,7 +2350,7 @@ mod tests {
             icon: Some("􀧓".into()),
             placement: Some("left".into()),
             interval: Some(1),
-            plugin: None,
+            source: crate::source::ItemSource::System(crate::source::SystemPlugin::Cpu),
             hover: Some(HoverConfig {
                 tooltip: Some("CPU usage".into()),
                 detail: None,
