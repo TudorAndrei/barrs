@@ -49,14 +49,6 @@ impl RiftTracker {
         self.snapshot.as_ref()
     }
 
-    /// Replaces the cache with `snapshot`, records that every Rift consumer
-    /// shows it, and ends any debounce.
-    pub fn reset(&mut self, snapshot: Option<RiftSnapshot>) {
-        self.published = snapshot.as_ref().map(RiftSnapshot::signature);
-        self.snapshot = snapshot;
-        self.deadline = None;
-    }
-
     /// Applies Rift events to the cached snapshot.
     ///
     /// A change starts the debounce. Without a cached snapshot, or when an
@@ -102,11 +94,18 @@ impl RiftTracker {
     }
 
     /// Records that every Rift consumer now shows the snapshot with
-    /// `signature`. The debounce ends when the cache holds that snapshot.
-    pub fn mark_published(&mut self, signature: Option<u64>) {
+    /// `signature`.
+    ///
+    /// The debounce ends when the cache holds that snapshot or is empty.
+    /// When the cache holds another snapshot, a debounce starts, so the
+    /// consumers render the cached one.
+    pub fn mark_published(&mut self, signature: Option<u64>, now: Instant) {
         self.published = signature;
-        if self.snapshot.as_ref().map(RiftSnapshot::signature) == signature {
+        let cached = self.snapshot.as_ref().map(RiftSnapshot::signature);
+        if cached.is_none() || cached == signature {
             self.deadline = None;
+        } else if self.deadline.is_none() {
+            self.schedule(now);
         }
     }
 
@@ -178,11 +177,18 @@ mod tests {
         }
     }
 
+    /// A tracker whose consumers show `shown`.
+    fn published(shown: &RiftSnapshot, now: Instant) -> RiftTracker {
+        let mut tracker = RiftTracker::new();
+        tracker.store(shown.clone(), now);
+        tracker.mark_published(Some(shown.signature()), now);
+        tracker
+    }
+
     #[test]
     fn a_changing_event_renders_once_after_the_debounce() {
         let now = Instant::now();
-        let mut tracker = RiftTracker::new();
-        tracker.reset(Some(snapshot("1")));
+        let mut tracker = published(&snapshot("1"), now);
 
         let outcome = tracker.on_events(&[switch_to(1)], now);
 
@@ -197,8 +203,7 @@ mod tests {
     #[test]
     fn a_due_cycle_without_consumers_ends_without_a_render() {
         let now = Instant::now();
-        let mut tracker = RiftTracker::new();
-        tracker.reset(Some(snapshot("1")));
+        let mut tracker = published(&snapshot("1"), now);
         tracker.store(snapshot("2"), now);
 
         let due = now + RIFT_DEBOUNCE;
@@ -210,8 +215,7 @@ mod tests {
     #[test]
     fn an_unchanged_signature_ends_the_cycle_and_a_later_change_renders() {
         let now = Instant::now();
-        let mut tracker = RiftTracker::new();
-        tracker.reset(Some(snapshot("1")));
+        let mut tracker = published(&snapshot("1"), now);
 
         tracker.store(snapshot("1"), now);
         let due = now + RIFT_DEBOUNCE;
@@ -232,7 +236,7 @@ mod tests {
             RiftEventsOutcome::NeedsSnapshot
         );
 
-        tracker.reset(Some(snapshot("1")));
+        tracker = published(&snapshot("1"), now);
         assert_eq!(
             tracker.on_events(&[name_only_event()], now),
             RiftEventsOutcome::NeedsSnapshot
@@ -250,12 +254,28 @@ mod tests {
         let fresh = snapshot("2");
         tracker.store(fresh.clone(), now);
 
-        tracker.mark_published(Some(fresh.signature()));
+        tracker.mark_published(Some(fresh.signature()), now);
 
         assert!(tracker.poll(now + RIFT_DEBOUNCE, true).is_none());
         assert_eq!(
             tracker.snapshot().map(RiftSnapshot::signature),
             Some(fresh.signature())
         );
+    }
+
+    #[test]
+    fn publishing_an_older_snapshot_renders_the_cached_one() {
+        let now = Instant::now();
+        let mut tracker = published(&snapshot("1"), now);
+        tracker.store(snapshot("2"), now);
+        let due = now + RIFT_DEBOUNCE;
+        assert!(tracker.poll(due, true).is_some());
+
+        tracker.mark_published(Some(snapshot("1").signature()), due);
+
+        let rendered = tracker
+            .poll(due + RIFT_DEBOUNCE, true)
+            .expect("consumers catch up with the cache");
+        assert_eq!(rendered.current_workspace, "2");
     }
 }

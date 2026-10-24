@@ -4,6 +4,7 @@ use std::fs;
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::json;
 use tokio::net::{UnixListener, UnixStream};
@@ -17,9 +18,9 @@ use crate::ipc::{
     EventPayload, Request, Response, read_request_frame, send_request, write_response,
 };
 use crate::lua_executor::{LuaExecutor, UpdateResult};
+use crate::producer::{Completion, ProducedItem, RiftUse, SnapshotProducer};
 use crate::render::{RenderItemSnapshot, Renderer};
-use crate::rift::{RiftBackendKind, RiftSnapshot, RiftSubscription, select_backend, subscribe};
-use crate::rift_tracker::{RiftEventsOutcome, RiftTracker};
+use crate::rift::{RiftBackend, RiftBackendKind, RiftSubscription};
 
 const EVENT_TICK_MS: u64 = 16;
 const POLL_TICK_MS: u64 = 250;
@@ -30,7 +31,13 @@ const CONNECTION_DRAIN_MS: u64 = 250;
 pub struct Daemon<R: Renderer> {
     config_path: PathBuf,
     state: DaemonState<R>,
-    pending_refresh: Option<tokio::task::JoinHandle<PendingRefresh>>,
+    producer: SnapshotProducer<Purpose>,
+    /// Whether a scheduled refresh is producing snapshots.
+    refresh_in_flight: bool,
+    /// A loaded config that waits for its snapshots before it replaces the
+    /// current one.
+    staged_reload: Option<StagedReload>,
+    reload_ticket: u64,
     update_sender: mpsc::UnboundedSender<UpdateResult>,
     update_receiver: mpsc::UnboundedReceiver<UpdateResult>,
 }
@@ -67,10 +74,30 @@ async fn serve_connection(mut stream: UnixStream, sender: mpsc::Sender<IncomingR
     let _ = write_response(&mut stream, &response).await;
 }
 
-struct PendingRefresh {
-    epoch: u64,
-    item_ids: Vec<String>,
-    states: Vec<(String, RenderItemSnapshot)>,
+/// Why the daemon requested a snapshot production, and what it does with
+/// the result.
+enum Purpose {
+    /// The first render, before the daemon reports readiness.
+    Startup,
+    /// A refresh of scheduled items that are due.
+    Scheduled { epoch: u64, item_ids: Vec<String> },
+    /// A refresh of one item after an event; `reply` answers a trigger request.
+    Event {
+        epoch: u64,
+        reply: Option<oneshot::Sender<Response>>,
+    },
+    /// The complete snapshot set of the staged reload with `ticket`.
+    Reload { ticket: u64 },
+}
+
+/// A loaded config and Lua runtime that replace the current ones when their
+/// snapshots are ready and the renderer reconciles them (ADR-0010).
+struct StagedReload {
+    ticket: u64,
+    config: Config,
+    lua: LuaExecutor,
+    backend: RiftBackendKind,
+    reply: oneshot::Sender<Response>,
 }
 
 struct IncomingRequest {
@@ -84,7 +111,6 @@ struct DaemonState<R: Renderer> {
     lua: LuaExecutor,
     backend: RiftBackendKind,
     rift_subscription: Option<RiftSubscription>,
-    rift: RiftTracker,
     renderer: R,
     item_states: HashMap<String, RenderItemSnapshot>,
     refresh_deadlines: HashMap<String, Instant>,
@@ -93,7 +119,8 @@ struct DaemonState<R: Renderer> {
 }
 
 impl<R: Renderer> Daemon<R> {
-    /// Creates a daemon from a config and the Lua executor that loaded it.
+    /// Creates a daemon from a config, the Lua executor that loaded it, and
+    /// the Rift backend that its snapshots read.
     ///
     /// # Errors
     ///
@@ -103,18 +130,18 @@ impl<R: Renderer> Daemon<R> {
         config: Config,
         lua: LuaExecutor,
         renderer: R,
+        rift_backend: Arc<dyn RiftBackend>,
     ) -> Result<Self, BarrsError> {
-        let backend = select_backend();
-        let backend_kind = backend.kind();
-        let rift_subscription = rift_subscription_for(&config);
+        let producer = SnapshotProducer::new(rift_backend);
+        let backend = producer.backend_kind();
+        let rift_subscription = producer.subscribe(&config);
         let state = DaemonState {
-            refresh_deadlines: build_refresh_deadlines(&config, Instant::now(), backend_kind),
+            refresh_deadlines: build_refresh_deadlines(&config, Instant::now(), backend),
             config,
             config_epoch: 0,
             lua,
-            backend: backend_kind,
+            backend,
             rift_subscription,
-            rift: RiftTracker::new(),
             renderer,
             item_states: HashMap::new(),
             updates_in_flight: HashSet::new(),
@@ -123,7 +150,10 @@ impl<R: Renderer> Daemon<R> {
         Ok(Self {
             config_path,
             state,
-            pending_refresh: None,
+            producer,
+            refresh_in_flight: false,
+            staged_reload: None,
+            reload_ticket: 0,
             update_sender,
             update_receiver,
         })
@@ -132,7 +162,13 @@ impl<R: Renderer> Daemon<R> {
     #[cfg(test)]
     fn new(config_path: PathBuf, config: Config, renderer: R) -> Result<Self, BarrsError> {
         let (lua, _) = LuaExecutor::start(&config_path)?;
-        Self::new_loaded(config_path, config, lua, renderer)
+        Self::new_loaded(
+            config_path,
+            config,
+            lua,
+            renderer,
+            Arc::new(crate::rift::FakeRiftBackend::default()),
+        )
     }
 
     /// Serves IPC requests and refreshes bar items until a stop request arrives.
@@ -144,7 +180,7 @@ impl<R: Renderer> Daemon<R> {
     pub async fn run(mut self) -> Result<(), BarrsError> {
         let socket_path = self.state.config.socket_path();
         let listener = bind_daemon_socket(&socket_path).await?;
-        if let Err(error) = self.refresh_all_items() {
+        if let Err(error) = self.refresh_all_items().await {
             cleanup_socket(&socket_path)?;
             return Err(error);
         }
@@ -156,20 +192,9 @@ impl<R: Renderer> Daemon<R> {
 
         loop {
             tokio::select! {
-                result = async {
-                    match self.pending_refresh.as_mut() {
-                        Some(pending) => pending.await,
-                        None => std::future::pending().await,
-                    }
-                }, if self.pending_refresh.is_some() => {
-                    self.pending_refresh = None;
-                    match result {
-                        Ok(pending) => {
-                            if let Err(error) = self.apply_refresh(pending) {
-                                eprintln!("barrs: applying refresh failed: {error}");
-                            }
-                        }
-                        Err(error) => eprintln!("barrs: refresh task failed: {error}"),
+                completion = self.producer.next() => {
+                    if let Err(error) = self.apply_completion(completion) {
+                        eprintln!("barrs: applying snapshots failed: {error}");
                     }
                 }
                 Some(_) = connections.join_next(), if !connections.is_empty() => {}
@@ -192,13 +217,7 @@ impl<R: Renderer> Daemon<R> {
                         continue;
                     };
                     let stop = matches!(incoming.request, Request::Stop);
-                    let response = match self.handle_request(incoming.request).await {
-                        Ok(response) => response,
-                        Err(error) => Response::Error {
-                            message: error.to_string(),
-                        },
-                    };
-                    let _ = incoming.response.send(response);
+                    self.handle_request(incoming.request, incoming.response).await;
                     if stop {
                         break;
                     }
@@ -207,7 +226,7 @@ impl<R: Renderer> Daemon<R> {
                     if let Err(error) = self.process_renderer_events().await {
                         eprintln!("barrs: renderer event processing failed: {error}");
                     }
-                    if let Err(error) = self.process_rift_events() {
+                    if let Err(error) = self.process_rift_events(Instant::now()) {
                         eprintln!("barrs: rift event processing failed: {error}");
                     }
                 }
@@ -217,9 +236,6 @@ impl<R: Renderer> Daemon<R> {
             }
         }
 
-        if let Some(pending) = self.pending_refresh.take() {
-            pending.abort();
-        }
         // The runtime can end when `run` returns, so let connection tasks send
         // their replies first. Closing the queue answers requests not yet handled.
         drop(request_receiver);
@@ -231,18 +247,23 @@ impl<R: Renderer> Daemon<R> {
         Ok(())
     }
 
-    async fn handle_request(&mut self, request: Request) -> Result<Response, BarrsError> {
-        match request {
+    /// Answers one IPC request through `reply`.
+    ///
+    /// A reload or an item trigger that needs new snapshots answers when the
+    /// snapshots are applied.
+    async fn handle_request(&mut self, request: Request, reply: oneshot::Sender<Response>) {
+        let response = match request {
             Request::Ping => Ok(Response::Pong),
             Request::Stop => Ok(Response::Ok {
                 message: "stopping".into(),
             }),
-            Request::Reload => {
-                self.reload()?;
-                Ok(Response::Ok {
-                    message: "reloaded".into(),
-                })
-            }
+            Request::Reload => match LuaExecutor::start(&self.config_path) {
+                Ok((lua, config)) => {
+                    self.stage_reload(lua, config, reply);
+                    return;
+                }
+                Err(error) => Err(error),
+            },
             Request::Status => {
                 let state = &self.state;
                 Ok(Response::Status {
@@ -252,62 +273,96 @@ impl<R: Renderer> Daemon<R> {
                     config_path: self.config_path.clone(),
                 })
             }
-            Request::DumpState => {
-                let state = &self.state;
-                Ok(Response::State(json!(state.item_states)))
-            }
-            Request::RiftBackend => {
-                let state = &self.state;
-                Ok(Response::RiftBackend {
-                    backend: state.backend,
-                })
-            }
+            Request::DumpState => Ok(Response::State(json!(self.state.item_states))),
+            Request::RiftBackend => Ok(Response::RiftBackend {
+                backend: self.state.backend,
+            }),
             Request::TriggerItem { payload } => {
-                self.dispatch_event(payload).await?;
-                Ok(Response::Ok {
-                    message: "event delivered".into(),
-                })
+                let mut reply = Some(reply);
+                let result = self.dispatch_event(payload, &mut reply).await;
+                // A requested refresh took the reply and answers it later.
+                if let Some(reply) = reply {
+                    send_reply(reply, result.map(|()| event_delivered()));
+                }
+                return;
             }
+        };
+        send_reply(reply, response);
+    }
+
+    /// Starts producing the snapshots of a loaded config. The config replaces
+    /// the current one when they arrive; a newer reload supersedes this one.
+    fn stage_reload(&mut self, lua: LuaExecutor, config: Config, reply: oneshot::Sender<Response>) {
+        self.reload_ticket = self.reload_ticket.wrapping_add(1);
+        let ticket = self.reload_ticket;
+        self.producer
+            .request(&config, &all_item_ids(&config), Purpose::Reload { ticket });
+        let staged = StagedReload {
+            ticket,
+            config,
+            lua,
+            backend: self.producer.backend_kind(),
+            reply,
+        };
+        if let Some(superseded) = self.staged_reload.replace(staged) {
+            send_reply(
+                superseded.reply,
+                Err(BarrsError::DaemonRejected(
+                    "reload superseded by a newer reload".into(),
+                )),
+            );
         }
     }
 
-    fn reload(&mut self) -> Result<(), BarrsError> {
-        let (lua, config) = LuaExecutor::start(&self.config_path)?;
-        let backend = select_backend();
-        let backend_kind = backend.kind();
-        let rift_snapshot = backend.snapshot().ok();
-        let next_states = snapshots_for_config(&config, rift_snapshot.as_ref())?;
+    /// Replaces the current config with a staged one whose snapshots are ready.
+    ///
+    /// A snapshot or reconcile error keeps the current config and state.
+    fn commit_reload(
+        &mut self,
+        config: Config,
+        lua: LuaExecutor,
+        backend: RiftBackendKind,
+        production: (Vec<ProducedItem>, RiftUse),
+    ) -> Result<(), BarrsError> {
+        let (items, rift) = production;
+        let next_states = items
+            .into_iter()
+            .map(|(_, snapshot)| snapshot)
+            .collect::<Result<Vec<_>, _>>()?;
         let state = &mut self.state;
         state.renderer.reconcile(&config, &next_states)?;
         state.config_epoch = state.config_epoch.wrapping_add(1);
-        state.backend = backend_kind;
+        state.backend = backend;
         state.config = config;
         state.lua = lua;
         state.updates_in_flight.clear();
-        state.refresh_deadlines =
-            build_refresh_deadlines(&state.config, Instant::now(), state.backend);
-        state.rift_subscription = rift_subscription_for(&state.config);
-        state.rift.reset(rift_snapshot);
-        state.item_states = next_states
-            .into_iter()
-            .map(|snapshot| (snapshot.id.clone(), snapshot))
-            .collect();
-
+        let now = Instant::now();
+        state.refresh_deadlines = build_refresh_deadlines(&state.config, now, state.backend);
+        state.rift_subscription = self.producer.subscribe(&state.config);
+        state.item_states = index_snapshots(next_states);
+        self.producer.record(rift, now);
         Ok(())
     }
 
-    fn refresh_all_items(&mut self) -> Result<(), BarrsError> {
-        let state = &mut self.state;
-        let rift_snapshot = select_backend().snapshot().ok();
-        let next_states = snapshots_for_config(&state.config, rift_snapshot.as_ref())?;
-        state.renderer.reconcile(&state.config, &next_states)?;
-        state.item_states = next_states
-            .into_iter()
-            .map(|snapshot| (snapshot.id.clone(), snapshot))
-            .collect();
-        state.rift.reset(rift_snapshot);
-
-        Ok(())
+    /// Produces and renders every item before the daemon reports readiness.
+    async fn refresh_all_items(&mut self) -> Result<(), BarrsError> {
+        let item_ids = all_item_ids(&self.state.config);
+        self.producer
+            .request(&self.state.config, &item_ids, Purpose::Startup);
+        loop {
+            let completion = self.producer.next().await;
+            let startup = matches!(
+                &completion,
+                Completion::Items(production) if matches!(production.tag, Purpose::Startup)
+            );
+            let result = self.apply_completion(completion);
+            if startup {
+                return result;
+            }
+            if let Err(error) = result {
+                eprintln!("barrs: applying snapshots failed: {error}");
+            }
+        }
     }
 
     fn refresh_due_items(&mut self) {
@@ -321,40 +376,16 @@ impl<R: Renderer> Daemon<R> {
                 });
         self.request_lua_updates(&lua_items);
 
-        if !can_start_refresh(self.pending_refresh.is_some(), &due_items) {
+        if !can_start_refresh(self.refresh_in_flight, &due_items) {
             return;
         }
-
-        let config = self.state.config.clone();
-        let epoch = self.state.config_epoch;
-        let cached_rift_snapshot = self.state.rift.snapshot().cloned();
-        let needs_rift = due_items.iter().any(|item_id| {
-            item_by_id(&config, item_id).is_some_and(|item| item.source.needs_rift())
-        });
-        self.pending_refresh = Some(tokio::task::spawn_blocking(move || {
-            let rift_snapshot = if needs_rift {
-                select_backend().snapshot().ok().or(cached_rift_snapshot)
-            } else {
-                cached_rift_snapshot
-            };
-            let mut states = Vec::new();
-            for (order, item) in config
-                .items
-                .iter()
-                .enumerate()
-                .filter(|(_, item)| due_items.iter().any(|item_id| item_id == &item.id))
-            {
-                match snapshot_for_item(item, order, rift_snapshot.as_ref()) {
-                    Ok(snapshot) => states.push((item.id.clone(), snapshot)),
-                    Err(error) => eprintln!("barrs: snapshot for {} failed: {error}", item.id),
-                }
-            }
-            PendingRefresh {
-                epoch,
-                item_ids: due_items,
-                states,
-            }
-        }));
+        self.refresh_in_flight = true;
+        let purpose = Purpose::Scheduled {
+            epoch: self.state.config_epoch,
+            item_ids: due_items.clone(),
+        };
+        self.producer
+            .request(&self.state.config, &due_items, purpose);
     }
 
     /// Queues the update functions of due Lua items that are not already in flight.
@@ -423,110 +454,191 @@ impl<R: Renderer> Daemon<R> {
         Ok(())
     }
 
-    fn apply_refresh(&mut self, pending: PendingRefresh) -> Result<(), BarrsError> {
-        let state = &mut self.state;
-        if !refresh_epoch_matches(state.config_epoch, pending.epoch) {
+    /// Applies a finished production for the purpose that requested it.
+    ///
+    /// Results for an older config generation or a superseded reload are
+    /// discarded.
+    fn apply_completion(&mut self, completion: Completion<Purpose>) -> Result<(), BarrsError> {
+        let Completion::Items(production) = completion else {
             return Ok(());
+        };
+        let (purpose, items, rift) = production.into_parts();
+        match purpose {
+            Purpose::Startup => {
+                let snapshots = items
+                    .into_iter()
+                    .map(|(_, snapshot)| snapshot)
+                    .collect::<Result<Vec<_>, _>>()?;
+                let state = &mut self.state;
+                state.renderer.reconcile(&state.config, &snapshots)?;
+                state.item_states = index_snapshots(snapshots);
+                self.producer.record(rift, Instant::now());
+                Ok(())
+            }
+            Purpose::Scheduled { epoch, item_ids } => {
+                self.refresh_in_flight = false;
+                if !refresh_epoch_matches(self.state.config_epoch, epoch) {
+                    return Ok(());
+                }
+                let state = &mut self.state;
+                for (item_id, snapshot) in items {
+                    match snapshot {
+                        Ok(snapshot) => {
+                            state.renderer.render_item(&snapshot)?;
+                            state.item_states.insert(item_id, snapshot);
+                        }
+                        Err(error) => eprintln!("barrs: snapshot for {item_id} failed: {error}"),
+                    }
+                }
+                let now = Instant::now();
+                advance_refresh_deadlines(
+                    &mut state.refresh_deadlines,
+                    &state.config,
+                    state.backend,
+                    &item_ids,
+                    now,
+                );
+                self.producer.record(rift, now);
+                Ok(())
+            }
+            Purpose::Event { epoch, reply } => {
+                let result = if refresh_epoch_matches(self.state.config_epoch, epoch) {
+                    self.show_event_items(items, rift)
+                } else {
+                    Ok(())
+                };
+                match reply {
+                    Some(reply) => {
+                        send_reply(reply, result.map(|()| event_delivered()));
+                        Ok(())
+                    }
+                    None => result,
+                }
+            }
+            Purpose::Reload { ticket } => {
+                let Some(staged) = self.staged_reload.take_if(|staged| staged.ticket == ticket)
+                else {
+                    return Ok(());
+                };
+                let result =
+                    self.commit_reload(staged.config, staged.lua, staged.backend, (items, rift));
+                send_reply(
+                    staged.reply,
+                    result.map(|()| Response::Ok {
+                        message: "reloaded".into(),
+                    }),
+                );
+                Ok(())
+            }
         }
-        for (item_id, snapshot) in pending.states {
+    }
+
+    fn show_event_items(
+        &mut self,
+        items: Vec<ProducedItem>,
+        rift: RiftUse,
+    ) -> Result<(), BarrsError> {
+        let state = &mut self.state;
+        for (item_id, snapshot) in items {
+            let snapshot = snapshot?;
             state.renderer.render_item(&snapshot)?;
             state.item_states.insert(item_id, snapshot);
         }
-        let now = Instant::now();
-        advance_refresh_deadlines(
-            &mut state.refresh_deadlines,
-            &state.config,
-            state.backend,
-            &pending.item_ids,
-            now,
-        );
-
+        self.producer.record(rift, Instant::now());
         Ok(())
     }
 
     async fn process_renderer_events(&mut self) -> Result<(), BarrsError> {
         let events = self.state.renderer.drain_events()?;
         for event in events {
-            self.dispatch_event(event).await?;
+            self.dispatch_event(event, &mut None).await?;
         }
         Ok(())
     }
 
-    fn process_rift_events(&mut self) -> Result<(), BarrsError> {
-        let now = Instant::now();
-        let state = &mut self.state;
-        let events = state
+    fn process_rift_events(&mut self, now: Instant) -> Result<(), BarrsError> {
+        let events = self
+            .state
             .rift_subscription
             .as_ref()
             .map(RiftSubscription::drain)
             .unwrap_or_default();
-        if state.rift.on_events(&events, now) == RiftEventsOutcome::NeedsSnapshot {
-            match select_backend().snapshot() {
-                Ok(snapshot) => state.rift.store(snapshot, now),
-                Err(_) => state.rift.invalidate(),
-            }
-        }
-
-        let Some(rift_snapshot) = state.rift.poll(now, has_rift_items(&state.config)) else {
-            return Ok(());
-        };
-        for (order, item) in state
-            .config
-            .items
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| item.source.needs_rift())
-        {
-            let snapshot = snapshot_for_item(item, order, Some(rift_snapshot))?;
+        self.producer.on_rift_events(&events, now);
+        let state = &mut self.state;
+        for snapshot in self.producer.due_rift_renders(&state.config, now)? {
             state.renderer.render_item(&snapshot)?;
-            state.item_states.insert(item.id.clone(), snapshot);
+            state.item_states.insert(snapshot.id.clone(), snapshot);
         }
         Ok(())
     }
 
-    async fn dispatch_event(&mut self, payload: EventPayload) -> Result<(), BarrsError> {
+    /// Delivers an item event to its Lua handler and the renderer, then
+    /// refreshes the item after a click or scroll.
+    ///
+    /// A refresh of a non-Lua item takes `reply` and answers it when the new
+    /// snapshot is shown.
+    async fn dispatch_event(
+        &mut self,
+        payload: EventPayload,
+        reply: &mut Option<oneshot::Sender<Response>>,
+    ) -> Result<(), BarrsError> {
         let state = &mut self.state;
-        let (order, item) = state
-            .config
-            .items
-            .iter()
-            .enumerate()
-            .find(|(_, item)| item.id == payload.item_id)
-            .ok_or_else(|| {
-                BarrsError::InvalidConfig(format!("unknown item {}", payload.item_id))
-            })?;
+        let item = item_by_id(&state.config, &payload.item_id).ok_or_else(|| {
+            BarrsError::InvalidConfig(format!("unknown item {}", payload.item_id))
+        })?;
 
         invoke_lua_handler(&state.lua, item, &payload).await?;
         state.renderer.handle_event(&payload)?;
 
-        if !matches!(
+        if matches!(
             payload.event,
             crate::ipc::EventKind::HoverEnter
                 | crate::ipc::EventKind::HoverLeave
                 | crate::ipc::EventKind::HoverUpdate
         ) {
-            if item.source.lua_update().is_some() {
-                // A handler can change the state an update function reads, so update at once.
-                state
-                    .refresh_deadlines
-                    .insert(item.id.clone(), Instant::now());
-            } else {
-                let fresh_rift_snapshot = if item.source.needs_rift() {
-                    select_backend().snapshot().ok()
-                } else {
-                    None
-                };
-                let rift_snapshot = fresh_rift_snapshot
-                    .as_ref()
-                    .or_else(|| state.rift.snapshot());
-                let snapshot = snapshot_for_item(item, order, rift_snapshot)?;
-                state.renderer.render_item(&snapshot)?;
-                state.item_states.insert(item.id.clone(), snapshot);
-            }
+            return Ok(());
         }
-
+        if item.source.lua_update().is_some() {
+            // A handler can change the state an update function reads, so update at once.
+            state
+                .refresh_deadlines
+                .insert(item.id.clone(), Instant::now());
+            return Ok(());
+        }
+        let item_ids = [item.id.clone()];
+        let purpose = Purpose::Event {
+            epoch: state.config_epoch,
+            reply: reply.take(),
+        };
+        self.producer
+            .request(&self.state.config, &item_ids, purpose);
         Ok(())
     }
+}
+
+fn send_reply(reply: oneshot::Sender<Response>, result: Result<Response, BarrsError>) {
+    let response = result.unwrap_or_else(|error| Response::Error {
+        message: error.to_string(),
+    });
+    // The client may have gone; nothing waits for this reply then.
+    let _ = reply.send(response);
+}
+
+fn event_delivered() -> Response {
+    Response::Ok {
+        message: "event delivered".into(),
+    }
+}
+
+fn all_item_ids(config: &Config) -> Vec<String> {
+    config.items.iter().map(|item| item.id.clone()).collect()
+}
+
+fn index_snapshots(snapshots: Vec<RenderItemSnapshot>) -> HashMap<String, RenderItemSnapshot> {
+    snapshots
+        .into_iter()
+        .map(|snapshot| (snapshot.id.clone(), snapshot))
+        .collect()
 }
 
 fn cleanup_socket(path: &Path) -> Result<(), BarrsError> {
@@ -664,35 +776,6 @@ fn updates_to_request<'a>(
         .filter(|item_id| !in_flight.contains(*item_id))
 }
 
-fn rift_subscription_for(config: &Config) -> Option<RiftSubscription> {
-    has_rift_items(config).then(subscribe).flatten()
-}
-
-fn has_rift_items(config: &Config) -> bool {
-    config.items.iter().any(|item| item.source.needs_rift())
-}
-
-fn snapshots_for_config(
-    config: &Config,
-    rift_snapshot: Option<&RiftSnapshot>,
-) -> Result<Vec<RenderItemSnapshot>, BarrsError> {
-    config
-        .items
-        .iter()
-        .enumerate()
-        .map(|(order, item)| snapshot_for_item(item, order, rift_snapshot))
-        .collect()
-}
-
-fn snapshot_for_item(
-    item: &ItemConfig,
-    order: usize,
-    rift_snapshot: Option<&RiftSnapshot>,
-) -> Result<RenderItemSnapshot, BarrsError> {
-    let content = item.source.content(rift_snapshot)?;
-    Ok(RenderItemSnapshot::from_item_config(item, order, content))
-}
-
 async fn invoke_lua_handler(
     lua: &LuaExecutor,
     item: &ItemConfig,
@@ -731,6 +814,7 @@ mod tests {
     use crate::config::{Config, ItemConfig, ItemHandlers, load_config};
     use crate::ipc::{Request, Response, default_socket_path, send_request};
     use crate::render::{NativeRenderer, NoopRenderer, Renderer};
+    use crate::rift::FakeRiftBackend;
     use crate::source::{ItemSource, SystemPlugin};
 
     use super::Daemon;
@@ -780,6 +864,46 @@ mod tests {
         ) -> Result<(), crate::error::BarrsError> {
             self.renders.fetch_add(1, Ordering::SeqCst);
             Ok(())
+        }
+    }
+
+    /// Delivers an event as the renderer would, with no request to answer.
+    async fn dispatch<R: Renderer>(
+        daemon: &mut Daemon<R>,
+        payload: crate::ipc::EventPayload,
+    ) -> Result<(), crate::error::BarrsError> {
+        daemon.dispatch_event(payload, &mut None).await
+    }
+
+    /// Waits for the next finished snapshot production and applies it.
+    async fn apply_next<R: Renderer>(daemon: &mut Daemon<R>) {
+        let completion = daemon.producer.next().await;
+        daemon
+            .apply_completion(completion)
+            .expect("apply snapshots");
+    }
+
+    /// Hands `request` to the daemon and applies finished productions until
+    /// the daemon answers it.
+    async fn answer<R: Renderer>(daemon: &mut Daemon<R>, request: Request) -> Response {
+        let (reply, mut response) = tokio::sync::oneshot::channel();
+        daemon.handle_request(request, reply).await;
+        loop {
+            match response.try_recv() {
+                Ok(response) => return response,
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    apply_next(daemon).await;
+                }
+                Err(error) => panic!("daemon dropped the reply: {error}"),
+            }
+        }
+    }
+
+    async fn reload<R: Renderer>(daemon: &mut Daemon<R>) -> Result<(), String> {
+        match answer(daemon, Request::Reload).await {
+            Response::Ok { .. } => Ok(()),
+            Response::Error { message } => Err(message),
+            other => panic!("unexpected reload response {other:?}"),
         }
     }
 
@@ -900,6 +1024,66 @@ return {{
             ),
         )
         .expect("write config");
+    }
+
+    fn write_rift_config(path: &Path, socket_path: &Path) {
+        fs::write(
+            path,
+            format!(
+                r#"
+return {{
+  socket_path = "{}",
+  items = {{
+    {{ id = "workspaces", plugin = {{ kind = "rift_workspaces" }} }},
+    {{ id = "layout", plugin = {{ kind = "rift_layout" }} }},
+  }}
+}}
+"#,
+                socket_path.display()
+            ),
+        )
+        .expect("write config");
+    }
+
+    fn rift_snapshot(current_workspace: &str) -> crate::rift::RiftSnapshot {
+        crate::rift::RiftSnapshot {
+            current_workspace: current_workspace.into(),
+            workspaces: ["1", "2", "3"]
+                .into_iter()
+                .map(|name| crate::rift::RiftWorkspace {
+                    name: name.into(),
+                    is_current: name == current_workspace,
+                    window_count: 1,
+                    has_windows: true,
+                })
+                .collect(),
+            layout: "tiling".into(),
+            window_count: 1,
+        }
+    }
+
+    /// A daemon for the Rift config whose snapshots read `backend`.
+    fn rift_daemon(
+        config_path: &Path,
+        renderer: CountingRenderer,
+        backend: &Arc<FakeRiftBackend>,
+    ) -> Daemon<CountingRenderer> {
+        let (lua, config) = crate::lua_executor::LuaExecutor::start(config_path).expect("load");
+        Daemon::new_loaded(
+            config_path.to_path_buf(),
+            config,
+            lua,
+            renderer,
+            Arc::<FakeRiftBackend>::clone(backend),
+        )
+        .expect("daemon")
+    }
+
+    fn shown_workspace<R: Renderer>(daemon: &Daemon<R>) -> String {
+        match &daemon.state.item_states["workspaces"].content {
+            crate::content::ItemContent::Workspaces { current, .. } => current.clone(),
+            other => panic!("unexpected workspaces content {other:?}"),
+        }
     }
 
     fn write_trigger_config(path: &Path, socket_path: &Path, marker_path: &Path) {
@@ -1550,37 +1734,153 @@ return {{
         write_evaluation_config(&config_path, &socket_path, &evaluation_path, &handler_path);
 
         let (lua, config) = crate::lua_executor::LuaExecutor::start(&config_path).expect("load");
-        let mut daemon =
-            Daemon::new_loaded(config_path.clone(), config, lua, NoopRenderer).expect("daemon");
+        let mut daemon = Daemon::new_loaded(
+            config_path.clone(),
+            config,
+            lua,
+            NoopRenderer,
+            Arc::new(FakeRiftBackend::default()),
+        )
+        .expect("daemon");
         assert_eq!(
             fs::read_to_string(&evaluation_path).expect("evaluation"),
             "1"
         );
-        daemon.refresh_all_items().expect("initial render");
+        daemon.refresh_all_items().await.expect("initial render");
         assert_eq!(daemon.state.item_states["generation"].content.text(), "1");
-        daemon
-            .dispatch_event(crate::ipc::EventPayload::from_trigger(
+        dispatch(
+            &mut daemon,
+            crate::ipc::EventPayload::from_trigger(
                 "generation".into(),
                 crate::cli::TriggerEvent::Click,
-            ))
-            .await
-            .expect("handler");
+            ),
+        )
+        .await
+        .expect("handler");
         assert_eq!(fs::read_to_string(&handler_path).expect("handler"), "1");
 
-        daemon.reload().expect("reload");
+        reload(&mut daemon).await.expect("reload");
         assert_eq!(
             fs::read_to_string(&evaluation_path).expect("evaluation"),
             "2"
         );
         assert_eq!(daemon.state.item_states["generation"].content.text(), "2");
-        daemon
-            .dispatch_event(crate::ipc::EventPayload::from_trigger(
+        dispatch(
+            &mut daemon,
+            crate::ipc::EventPayload::from_trigger(
                 "generation".into(),
                 crate::cli::TriggerEvent::Click,
-            ))
-            .await
-            .expect("handler");
+            ),
+        )
+        .await
+        .expect("handler");
         assert_eq!(fs::read_to_string(&handler_path).expect("handler"), "2");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_click_on_a_rift_consumer_refreshes_the_rift_tracker() {
+        let dir = tempdir().expect("tempdir");
+        let config_path = dir.path().join("barrs.lua");
+        write_rift_config(&config_path, &dir.path().join("barrs.sock"));
+        let backend = Arc::new(FakeRiftBackend::default());
+        backend.set(Some(rift_snapshot("1")));
+        let renders = Arc::new(AtomicUsize::new(0));
+        let renderer = CountingRenderer {
+            renders: Arc::clone(&renders),
+        };
+        let mut daemon = rift_daemon(&config_path, renderer, &backend);
+        daemon.refresh_all_items().await.expect("initial render");
+        backend.set(Some(rift_snapshot("2")));
+
+        let response = answer(
+            &mut daemon,
+            Request::TriggerItem {
+                payload: crate::ipc::EventPayload::from_trigger(
+                    "workspaces".into(),
+                    crate::cli::TriggerEvent::Click,
+                ),
+            },
+        )
+        .await;
+
+        assert!(matches!(response, Response::Ok { .. }));
+        assert_eq!(shown_workspace(&daemon), "2");
+        let cached = daemon.producer.rift_snapshot().expect("cached snapshot");
+        assert_eq!(cached.current_workspace, "2");
+        // The layout item still shows the older snapshot, so both consumers
+        // render the cached one once after the debounce.
+        let before_poll = renders.load(Ordering::SeqCst);
+        let later = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        daemon.process_rift_events(later).expect("debounced render");
+        assert_eq!(renders.load(Ordering::SeqCst), before_poll + 2);
+        daemon.process_rift_events(later).expect("no-op poll");
+        assert_eq!(renders.load(Ordering::SeqCst), before_poll + 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reload_reads_rift_through_the_injected_backend() {
+        let dir = tempdir().expect("tempdir");
+        let config_path = dir.path().join("barrs.lua");
+        write_rift_config(&config_path, &dir.path().join("barrs.sock"));
+        let backend = Arc::new(FakeRiftBackend::default());
+        backend.set(Some(rift_snapshot("1")));
+        let renderer = CountingRenderer {
+            renders: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut daemon = rift_daemon(&config_path, renderer, &backend);
+        daemon.refresh_all_items().await.expect("initial render");
+        assert_eq!(shown_workspace(&daemon), "1");
+        backend.set(Some(rift_snapshot("3")));
+
+        reload(&mut daemon).await.expect("reload");
+
+        assert_eq!(shown_workspace(&daemon), "3");
+        assert_eq!(backend.fetches(), 2);
+        let later = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        let renders = daemon.state.renderer.renders.load(Ordering::SeqCst);
+        daemon.process_rift_events(later).expect("no-op poll");
+        assert_eq!(
+            daemon.state.renderer.renders.load(Ordering::SeqCst),
+            renders
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn snapshots_produced_for_an_older_config_are_discarded() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("barrs.sock");
+        let config_path = dir.path().join("barrs.lua");
+        write_item_config(&config_path, &socket_path, &["old"]);
+        let config = load_config(&config_path).expect("config");
+        let mut daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
+        daemon.refresh_all_items().await.expect("initial render");
+        dispatch(
+            &mut daemon,
+            crate::ipc::EventPayload::from_trigger("old".into(), crate::cli::TriggerEvent::Click),
+        )
+        .await
+        .expect("click");
+        write_item_config(&config_path, &socket_path, &["new"]);
+        let (reply, mut response) = tokio::sync::oneshot::channel();
+        daemon.handle_request(Request::Reload, reply).await;
+
+        // Apply the reload before the click refresh that the old config requested.
+        let mut completions = vec![daemon.producer.next().await, daemon.producer.next().await];
+        completions.sort_by_key(|completion| {
+            !matches!(
+                completion,
+                super::Completion::Items(production)
+                    if matches!(production.tag, super::Purpose::Reload { .. })
+            )
+        });
+        for completion in completions {
+            daemon.apply_completion(completion).expect("apply");
+        }
+
+        assert!(matches!(response.try_recv(), Ok(Response::Ok { .. })));
+        let mut item_ids = daemon.state.item_states.keys().cloned().collect::<Vec<_>>();
+        item_ids.sort();
+        assert_eq!(item_ids, vec!["new"]);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1593,10 +1893,10 @@ return {{
         let config = load_config(&config_path).expect("config");
         let mut daemon =
             Daemon::new(config_path.clone(), config, NativeRenderer::default()).expect("daemon");
-        daemon.refresh_all_items().expect("initial render");
+        daemon.refresh_all_items().await.expect("initial render");
         write_item_config(&config_path, &socket_path, &["retained", "new"]);
 
-        daemon.reload().expect("reload");
+        reload(&mut daemon).await.expect("reload");
 
         let state = &daemon.state;
         let mut item_ids = state.item_states.keys().cloned().collect::<Vec<_>>();
@@ -1629,16 +1929,16 @@ return {{
         };
         let config = load_config(&config_path).expect("config");
         let mut daemon = Daemon::new(config_path.clone(), config, renderer).expect("daemon");
-        daemon.refresh_all_items().expect("initial render");
+        daemon.refresh_all_items().await.expect("initial render");
         assert_eq!(initializations.load(Ordering::SeqCst), 1);
 
         write_item_config(&config_path, &socket_path, &["retained"]);
-        daemon.reload().expect("successful reload");
+        reload(&mut daemon).await.expect("successful reload");
         assert_eq!(initializations.load(Ordering::SeqCst), 2);
 
         write_item_config(&config_path, &socket_path, &["new"]);
         fail_initialization.store(true, Ordering::SeqCst);
-        daemon.reload().expect_err("reload must fail");
+        reload(&mut daemon).await.expect_err("reload must fail");
 
         let state = &daemon.state;
         assert_eq!(state.config.items[0].id, "retained");
@@ -1660,13 +1960,15 @@ return {{
         let config = load_config(&config_path).expect("config");
         let mut daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
 
-        let error = daemon
-            .dispatch_event(crate::ipc::EventPayload::from_trigger(
+        let error = dispatch(
+            &mut daemon,
+            crate::ipc::EventPayload::from_trigger(
                 "missing".into(),
                 crate::cli::TriggerEvent::HoverEnter,
-            ))
-            .await
-            .expect_err("unknown item should fail");
+            ),
+        )
+        .await
+        .expect_err("unknown item should fail");
 
         assert!(error.to_string().contains("unknown item missing"));
         assert!(!marker_path.exists());
@@ -1822,10 +2124,11 @@ return {{
         let config = load_config(&config_path).expect("config");
         let mut daemon =
             Daemon::new(config_path.clone(), config, NativeRenderer::default()).expect("daemon");
-        daemon.refresh_all_items().expect("initial render");
+        daemon.refresh_all_items().await.expect("initial render");
 
-        daemon
-            .dispatch_event(crate::ipc::EventPayload {
+        dispatch(
+            &mut daemon,
+            crate::ipc::EventPayload {
                 item_id: "clock".into(),
                 event: crate::ipc::EventKind::HoverEnter,
                 timestamp_ms: 0,
@@ -1836,9 +2139,10 @@ return {{
                     scroll_delta: None,
                 },
                 modifiers: crate::ipc::Modifiers::default(),
-            })
-            .await
-            .expect("hover event");
+            },
+        )
+        .await
+        .expect("hover event");
 
         let state = &daemon.state;
         assert_eq!(
@@ -1861,11 +2165,12 @@ return {{
 
         let config = load_config(&config_path).expect("config");
         let mut daemon = Daemon::new(config_path.clone(), config, renderer).expect("daemon");
-        daemon.refresh_all_items().expect("initial render");
+        daemon.refresh_all_items().await.expect("initial render");
         assert_eq!(renders.load(Ordering::SeqCst), 1);
 
-        daemon
-            .dispatch_event(crate::ipc::EventPayload {
+        dispatch(
+            &mut daemon,
+            crate::ipc::EventPayload {
                 item_id: "clock".into(),
                 event: crate::ipc::EventKind::HoverUpdate,
                 timestamp_ms: 0,
@@ -1876,19 +2181,20 @@ return {{
                     scroll_delta: None,
                 },
                 modifiers: crate::ipc::Modifiers::default(),
-            })
-            .await
-            .expect("hover update");
+            },
+        )
+        .await
+        .expect("hover update");
 
         assert_eq!(renders.load(Ordering::SeqCst), 1);
 
-        daemon
-            .dispatch_event(crate::ipc::EventPayload::from_trigger(
-                "clock".into(),
-                crate::cli::TriggerEvent::Click,
-            ))
-            .await
-            .expect("click refresh");
+        dispatch(
+            &mut daemon,
+            crate::ipc::EventPayload::from_trigger("clock".into(), crate::cli::TriggerEvent::Click),
+        )
+        .await
+        .expect("click refresh");
+        apply_next(&mut daemon).await;
         assert_eq!(renders.load(Ordering::SeqCst), 2);
     }
 
@@ -1917,27 +2223,37 @@ return {{
         let renderer = CountingRenderer {
             renders: Arc::clone(&renders),
         };
-        let mut daemon = Daemon::new_loaded(config_path, config, lua, renderer).expect("daemon");
+        let mut daemon = Daemon::new_loaded(
+            config_path,
+            config,
+            lua,
+            renderer,
+            Arc::new(FakeRiftBackend::default()),
+        )
+        .expect("daemon");
 
         let initial_error = daemon
             .refresh_all_items()
+            .await
             .expect_err("format exceeds buffer");
         assert!(matches!(
             initial_error,
             crate::error::BarrsError::Unsupported(message) if message == "failed to format local time"
         ));
-        let click_error = daemon
-            .handle_request(Request::TriggerItem {
+        let click_response = answer(
+            &mut daemon,
+            Request::TriggerItem {
                 payload: crate::ipc::EventPayload::from_trigger(
                     "date".into(),
                     crate::cli::TriggerEvent::Click,
                 ),
-            })
-            .await
-            .expect_err("click must propagate the snapshot error");
+            },
+        )
+        .await;
         assert!(matches!(
-            click_error,
-            crate::error::BarrsError::Unsupported(message) if message == "failed to format local time"
+            click_response,
+            Response::Error { message }
+                if message == "unsupported operation: failed to format local time"
         ));
         assert_eq!(renders.load(Ordering::SeqCst), 0);
         assert!(daemon.state.item_states.is_empty());
@@ -1954,7 +2270,7 @@ return {{
         let config = load_config(&config_path).expect("config");
         let mut daemon =
             Daemon::new(config_path.clone(), config, NativeRenderer::default()).expect("daemon");
-        daemon.refresh_all_items().expect("initial render");
+        daemon.refresh_all_items().await.expect("initial render");
         let event = crate::ipc::EventPayload {
             item_id: "clock".into(),
             event: crate::ipc::EventKind::HoverUpdate,
@@ -1968,11 +2284,10 @@ return {{
             modifiers: crate::ipc::Modifiers::default(),
         };
 
-        daemon
-            .dispatch_event(event.clone())
+        dispatch(&mut daemon, event.clone())
             .await
             .expect("first update");
-        daemon.dispatch_event(event).await.expect("same update");
+        dispatch(&mut daemon, event).await.expect("same update");
 
         assert_eq!(fs::read_to_string(&marker_path).expect("marker"), "2");
     }

@@ -125,6 +125,10 @@ impl Drop for RiftSubscription {
     }
 }
 
+/// A source of Rift workspace state that the daemon reads.
+///
+/// The daemon receives one at construction: [`SelectedRiftBackend`] in
+/// production, a fake in tests.
 pub trait RiftBackend: Send + Sync {
     fn kind(&self) -> RiftBackendKind;
 
@@ -134,6 +138,11 @@ pub trait RiftBackend: Send + Sync {
     ///
     /// Returns an error when the backend cannot reach Rift or cannot decode its response.
     fn snapshot(&self) -> Result<RiftSnapshot, BarrsError>;
+
+    /// Subscribes to Rift change events, when the backend can deliver them.
+    fn subscribe(&self) -> Option<RiftSubscription> {
+        None
+    }
 }
 
 #[derive(Debug, Default)]
@@ -170,6 +179,70 @@ impl RiftBackend for MachRiftBackend {
                 "Mach IPC is only supported on macOS".into(),
             ))
         }
+    }
+
+    fn subscribe(&self) -> Option<RiftSubscription> {
+        subscribe()
+    }
+}
+
+/// The production Rift backend: it selects the Mach or CLI backend again on
+/// every call, so the daemon follows Rift when it starts or stops.
+#[derive(Debug, Default)]
+pub struct SelectedRiftBackend;
+
+impl RiftBackend for SelectedRiftBackend {
+    fn kind(&self) -> RiftBackendKind {
+        select_backend().kind()
+    }
+
+    fn snapshot(&self) -> Result<RiftSnapshot, BarrsError> {
+        select_backend().snapshot()
+    }
+
+    fn subscribe(&self) -> Option<RiftSubscription> {
+        select_backend().subscribe()
+    }
+}
+
+/// A Rift backend for tests that returns a snapshot the test sets.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub struct FakeRiftBackend {
+    snapshot: std::sync::Mutex<Option<RiftSnapshot>>,
+    fetches: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl FakeRiftBackend {
+    /// Sets the snapshot that later fetches return; `None` makes them fail.
+    pub fn set(&self, snapshot: Option<RiftSnapshot>) {
+        *self
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot;
+    }
+
+    /// Number of snapshot fetches so far.
+    pub fn fetches(&self) -> usize {
+        self.fetches.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+impl RiftBackend for FakeRiftBackend {
+    fn kind(&self) -> RiftBackendKind {
+        RiftBackendKind::Mach
+    }
+
+    fn snapshot(&self) -> Result<RiftSnapshot, BarrsError> {
+        self.fetches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| BarrsError::Unsupported("fake rift is unavailable".into()))
     }
 }
 

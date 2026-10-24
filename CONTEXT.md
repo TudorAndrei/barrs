@@ -37,3 +37,12 @@ Rift item.
 **Published signature**: the signature of the Rift snapshot that every Rift
 consumer shows now. A snapshot with another signature needs a render.
 _Avoid_: last signature.
+
+**Snapshot producer**: the daemon's module (`SnapshotProducer`) that turns
+item sources into renderer snapshots on blocking tasks, reads Rift through the
+injected Rift backend, and keeps the Rift tracker current. _Avoid_: refresher,
+fetcher.
+
+**Staged reload**: a loaded config and Lua runtime that wait for their
+complete snapshot set before they replace the current ones. _Avoid_: pending
+config.

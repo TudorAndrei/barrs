@@ -33,15 +33,22 @@ function, and its current item content; it does not match on plugin kinds.
 System and Rift sources read their data through `src/plugin.rs`. Item content,
 `src/content.rs#enum:ItemContent`, is text, Rift workspaces, or unavailable;
 the renderer picks the item layout from that variant, not from JSON keys, and
-`dump-state` shows its JSON form. The daemon transforms that content into
-renderer snapshots through `src/render.rs`. Lua updates run on the Lua
+`dump-state` shows its JSON form. The snapshot producer,
+`src/producer.rs#struct:SnapshotProducer`, turns item sources into renderer
+snapshots (`src/render.rs`) on blocking tasks and returns each result to the
+event loop as a message tagged with its purpose: startup, a scheduled refresh,
+an item event, or a reload. The daemon discards results for an older config
+epoch or a superseded reload. A reload stages the loaded config and replaces
+the current one only when its complete snapshot set is ready and the renderer
+reconciles it; the reload reply waits for that. Startup applies its snapshots
+before the daemon reports readiness. Lua updates run on the Lua
 executor and always return text content, or fail to unavailable content. The
 native renderer is macOS/AppKit-specific and is intentionally current-thread
 only; the noop renderer supports tests and non-visual operation.
 
 The daemon directly owns its state. Its event loop processes stateful requests
 and results in order. Connection tasks parse requests, the blocking snapshot
-task reads owned inputs, and `src/lua_executor.rs` owns Lua on a separate
+tasks read owned inputs, and `src/lua_executor.rs` owns Lua on a separate
 thread. These tasks return values through messages. They do not share mutable
 daemon state or retained AppKit objects.
 
@@ -64,7 +71,12 @@ platform paths.
 ## External data
 
 `src/rift.rs` selects the Rift Mach backend when available, otherwise the Rift
-CLI backend. It supplies workspace and layout snapshots and can subscribe to
+CLI backend. The daemon receives a Rift backend at construction:
+`src/rift.rs#struct:SelectedRiftBackend` selects again on every call in
+production, and tests pass a fake, so no daemon test reaches Rift. The
+snapshot producer owns the backend and the Rift tracker; every fetch, from a
+refresh, an item event, a reload, or an event resync, goes into the same
+tracker. It supplies workspace and layout snapshots and can subscribe to
 Rift events so the daemon refreshes affected items. The Rift tracker,
 `src/rift_tracker.rs#struct:RiftTracker`, caches the latest snapshot, applies
 events to it, and debounces renders of the Rift consumers. Its poll ends every
@@ -78,7 +90,8 @@ bounded child-process execution for platform queries and the CLI fallback.
 - CLI commands and arguments: `src/cli.rs`
 - Command dispatch and daemon startup: `src/app.rs`
 - Lua configuration schema and validation: `src/config.rs`
-- Daemon lifecycle, scheduler, and snapshots: `src/daemon.rs`
+- Daemon lifecycle, scheduler, reload, and replies: `src/daemon.rs`
+- Snapshot production off the event loop: `src/producer.rs`
 - Framed Unix-socket protocol: `src/ipc.rs`
 - Item sources and their refresh policy: `src/source.rs`
 - Built-in system and Rift snapshot data: `src/plugin.rs`
