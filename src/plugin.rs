@@ -1,14 +1,12 @@
 use std::ffi::{CStr, CString};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 
 use crate::content::{ItemContent, Workspace};
 use crate::error::BarrsError;
-use crate::process::run_command_with_timeout;
 use crate::rift::RiftSnapshot;
 
-const SYSTEM_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 const TIME_FORMAT: &str = "%H:%M";
 
 /// Current CPU usage, or unavailable content.
@@ -42,12 +40,12 @@ pub(crate) fn date(format: &str) -> Result<ItemContent, BarrsError> {
 
 /// Current battery charge, or unavailable content.
 pub(crate) fn battery() -> ItemContent {
-    battery_snapshot_from_pmset().unwrap_or(ItemContent::Unavailable)
+    battery_snapshot_from_power_sources().unwrap_or(ItemContent::Unavailable)
 }
 
 /// Current GPU utilization, or unavailable content.
 pub(crate) fn gpu() -> ItemContent {
-    gpu_snapshot_from_ioreg().unwrap_or(ItemContent::Unavailable)
+    gpu_snapshot_from_accelerator().unwrap_or(ItemContent::Unavailable)
 }
 
 /// Rift workspaces, or unavailable content without a snapshot.
@@ -209,88 +207,184 @@ fn format_local_time(format: &str) -> Result<String, BarrsError> {
     Ok(formatted.to_string_lossy().into_owned())
 }
 
-fn battery_snapshot_from_pmset() -> Option<ItemContent> {
-    #[cfg(target_os = "macos")]
-    {
-        let output = run_command_with_timeout("pmset", &["-g", "batt"], SYSTEM_QUERY_TIMEOUT)?;
-        if !output.status.success() {
-            return None;
-        }
-        parse_battery_output(std::str::from_utf8(&output.stdout).ok()?)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
-    }
+fn battery_snapshot_from_power_sources() -> Option<ItemContent> {
+    let battery = iokit::battery()?;
+    let percentage = battery_percentage(battery.current_capacity, battery.max_capacity)?;
+    Some(ItemContent::plain_with_fields(
+        format!("{percentage}%"),
+        [
+            ("percentage", json!(percentage)),
+            ("charging", json!(battery.charging)),
+        ],
+    ))
 }
 
-fn gpu_snapshot_from_ioreg() -> Option<ItemContent> {
-    #[cfg(target_os = "macos")]
-    {
-        let output = run_command_with_timeout(
-            "ioreg",
-            &["-r", "-d", "1", "-c", "IOAccelerator"],
-            SYSTEM_QUERY_TIMEOUT,
-        )?;
-        if !output.status.success() {
-            return None;
-        }
-        parse_gpu_output(std::str::from_utf8(&output.stdout).ok()?)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
-    }
-}
-
-fn parse_gpu_output(output: &str) -> Option<ItemContent> {
-    let marker = "\"Device Utilization %\"=";
-    let (_, tail) = output.split_once(marker)?;
-    let number: String = tail
-        .chars()
-        .skip_while(|ch| ch.is_whitespace())
-        .take_while(char::is_ascii_digit)
-        .collect();
-    let utilization = number.parse::<u8>().ok()?;
+fn gpu_snapshot_from_accelerator() -> Option<ItemContent> {
+    let utilization = u8::try_from(iokit::gpu_utilization()?).ok()?;
     Some(ItemContent::plain_with_fields(
         format!("{utilization}%"),
         [("utilization_percent", json!(utilization))],
     ))
 }
 
-fn parse_battery_output(output: &str) -> Option<ItemContent> {
-    let lower = output.to_ascii_lowercase();
-    let percentage = output
-        .split_whitespace()
-        .find_map(|token| {
-            token
-                .trim_matches(|ch: char| matches!(ch, ';' | ',' | '\t'))
-                .strip_suffix('%')
+/// Charge in whole percent, rounded the way `pmset` rounds it.
+fn battery_percentage(current_capacity: i64, max_capacity: i64) -> Option<u8> {
+    let scaled = current_capacity
+        .checked_mul(100)?
+        .checked_add(max_capacity.checked_div(2)?)?;
+    u8::try_from(scaled.checked_div(max_capacity)?).ok()
+}
+
+/// The internal battery as the power sources API reports it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+struct BatteryReading {
+    current_capacity: i64,
+    max_capacity: i64,
+    charging: bool,
+}
+
+/// Battery and GPU readings from `IOKit`. They do not start a process.
+#[cfg(target_os = "macos")]
+mod iokit {
+    use objc2_core_foundation::{
+        CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType,
+    };
+    use objc2_io_kit::{
+        IOIteratorNext, IOObjectRelease, IOPSCopyPowerSourcesInfo, IOPSCopyPowerSourcesList,
+        IOPSGetPowerSourceDescription, IORegistryEntryCreateCFProperty,
+        IOServiceGetMatchingServices, IOServiceMatching, io_iterator_t, io_service_t,
+        kIOMainPortDefault,
+    };
+
+    use super::BatteryReading;
+
+    type Properties = CFDictionary<CFType, CFType>;
+
+    /// The `Device Utilization %` statistic of the first GPU that reports it.
+    pub(super) fn gpu_utilization() -> Option<i64> {
+        // SAFETY: The class name is a NUL-terminated C string.
+        let matching = unsafe { IOServiceMatching(c"IOAccelerator".as_ptr()) }?;
+        // SAFETY: A mutable dictionary is a dictionary.
+        let matching = unsafe { CFRetained::cast_unchecked::<CFDictionary>(matching) };
+        // SAFETY: `kIOMainPortDefault` is an initialized constant.
+        let main_port = unsafe { kIOMainPortDefault };
+        let mut iterator: io_iterator_t = 0;
+        // SAFETY: The call consumes `matching`, and `iterator` is valid for writes for the whole
+        // call.
+        let result =
+            unsafe { IOServiceGetMatchingServices(main_port, Some(matching), &raw mut iterator) };
+        if result != libc::KERN_SUCCESS {
+            return None;
+        }
+        let mut utilization = None;
+        while utilization.is_none() {
+            let service = IOIteratorNext(iterator);
+            if service == 0 {
+                break;
+            }
+            utilization = service_utilization(service);
+            IOObjectRelease(service);
+        }
+        IOObjectRelease(iterator);
+        utilization
+    }
+
+    fn service_utilization(service: io_service_t) -> Option<i64> {
+        let key = CFString::from_static_str("PerformanceStatistics");
+        // SAFETY: `service` is a live registry entry until the caller releases it, and `key` is
+        // a CF string.
+        let statistics = unsafe { IORegistryEntryCreateCFProperty(service, Some(&key), None, 0) }?;
+        let statistics = properties(statistics)?;
+        number(&statistics, "Device Utilization %")
+    }
+
+    /// The first power source with a capacity, which is the internal battery.
+    pub(super) fn battery() -> Option<BatteryReading> {
+        let info = IOPSCopyPowerSourcesInfo()?;
+        // SAFETY: `info` is the power sources blob that `IOPSCopyPowerSourcesInfo` returned.
+        let sources = unsafe { IOPSCopyPowerSourcesList(Some(&info)) }?;
+        // SAFETY: Every element of a CF array is a CF object, so `CFType` describes them.
+        let sources = unsafe { CFRetained::cast_unchecked::<CFArray<CFType>>(sources) };
+        (0..sources.len()).find_map(|index| {
+            let source = sources.get(index)?;
+            // SAFETY: `source` is an element of the list that `info` gave, and `info` is alive.
+            let description = unsafe { IOPSGetPowerSourceDescription(Some(&info), Some(&source)) }?;
+            let description = properties(description.into())?;
+            battery_reading(&description)
         })
-        .and_then(|value| value.parse::<u8>().ok())?;
-    let charging = lower.contains("ac power") || lower.contains("; charging;");
-    Some(ItemContent::plain_with_fields(
-        format!("{percentage}%"),
-        [
-            ("percentage", json!(percentage)),
-            ("charging", json!(charging)),
-        ],
-    ))
+    }
+
+    fn battery_reading(description: &Properties) -> Option<BatteryReading> {
+        let on_ac_power =
+            string(description, "Power Source State").is_some_and(|state| state == "AC Power");
+        let charging = boolean(description, "Is Charging").unwrap_or(false);
+        Some(BatteryReading {
+            current_capacity: number(description, "Current Capacity")?,
+            max_capacity: number(description, "Max Capacity")?,
+            charging: on_ac_power || charging,
+        })
+    }
+
+    fn properties(value: CFRetained<CFType>) -> Option<CFRetained<Properties>> {
+        let dictionary = value.downcast::<CFDictionary>().ok()?;
+        // SAFETY: Every key and value of a CF dictionary is a CF object, so `CFType` describes
+        // both.
+        Some(unsafe { CFRetained::cast_unchecked::<Properties>(dictionary) })
+    }
+
+    fn value(properties: &Properties, key: &'static str) -> Option<CFRetained<CFType>> {
+        let key: CFRetained<CFType> = CFString::from_static_str(key).into();
+        properties.get(&key)
+    }
+
+    fn number(properties: &Properties, key: &'static str) -> Option<i64> {
+        value(properties, key)?
+            .downcast::<CFNumber>()
+            .ok()?
+            .as_i64()
+    }
+
+    fn boolean(properties: &Properties, key: &'static str) -> Option<bool> {
+        Some(
+            value(properties, key)?
+                .downcast::<CFBoolean>()
+                .ok()?
+                .as_bool(),
+        )
+    }
+
+    fn string(properties: &Properties, key: &'static str) -> Option<String> {
+        Some(
+            value(properties, key)?
+                .downcast::<CFString>()
+                .ok()?
+                .to_string(),
+        )
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod iokit {
+    use super::BatteryReading;
+
+    pub(super) const fn gpu_utilization() -> Option<i64> {
+        None
+    }
+
+    pub(super) const fn battery() -> Option<BatteryReading> {
+        None
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::plugin::{cpu_usage_between, parse_battery_output, parse_gpu_output};
+    use crate::plugin::{battery_percentage, cpu_usage_between};
 
     #[test]
-    fn parses_battery_output() {
-        let snapshot = parse_battery_output(
-            "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=1234567)\t81%; discharging; 3:21 remaining present: true",
-        )
-        .expect("parsed battery output")
-        .data();
-        assert_eq!(snapshot["percentage"], 81);
-        assert_eq!(snapshot["charging"], false);
+    fn battery_percentage_rounds_the_capacity_share() {
+        assert_eq!(battery_percentage(81, 100), Some(81));
+        assert_eq!(battery_percentage(4321, 5000), Some(86));
+        assert_eq!(battery_percentage(1, 0), None);
     }
 
     #[test]
@@ -310,16 +404,5 @@ mod tests {
     #[test]
     fn cpu_usage_is_unknown_without_new_ticks() {
         assert_eq!(cpu_usage_between([1, 2, 3, 4], [1, 2, 3, 4]), None);
-    }
-
-    #[test]
-    fn parses_gpu_output() {
-        let snapshot = parse_gpu_output(
-            "\"PerformanceStatistics\" = {\"Tiler Utilization %\"=14,\"Renderer Utilization %\"=40,\"Device Utilization %\"=40}",
-        )
-        .expect("parsed gpu output")
-        .data();
-        assert_eq!(snapshot["text"], "40%");
-        assert_eq!(snapshot["utilization_percent"], 40);
     }
 }
