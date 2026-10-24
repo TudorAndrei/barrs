@@ -165,7 +165,11 @@ ignored. A configured handler name must exist when the config is loaded. If a
 handler raises an error while processing an IPC request, the daemon returns an
 error response and the CLI exits nonzero; errors from native renderer events
 are logged by the daemon. A handler that runs longer than 1 second is stopped
-with an error.
+with an error. The daemon does not wait for a handler: it queues the call on
+the Lua thread and keeps serving the bar and IPC requests. An `item trigger`
+request gets its reply when the handler ends, so it can wait behind a running
+update function. Hover state on the bar changes at once, before the hover
+handler runs.
 
 The bundled sample records the most recent time-item event in Lua state without
 launching external programs:

@@ -1,11 +1,17 @@
 pub mod app;
+mod bar;
 pub mod cli;
 pub mod config;
+pub mod content;
 pub mod daemon;
 pub mod error;
 pub mod ipc;
+pub mod lua_dispatch;
 pub mod lua_executor;
 pub mod plugin;
 mod process;
+pub mod producer;
 pub mod render;
 pub mod rift;
+pub mod rift_tracker;
+pub mod source;

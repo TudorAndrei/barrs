@@ -39,6 +39,7 @@ pub async fn run(cli: Cli) -> Result<(), BarrsError> {
                     apply_socket_override(config, args.socket),
                     lua,
                     create_renderer(crate::render::RendererKind::Native)?,
+                    std::sync::Arc::new(rift::SelectedRiftBackend),
                 )?;
                 return daemon.run().await;
             }
@@ -61,6 +62,7 @@ pub async fn run(cli: Cli) -> Result<(), BarrsError> {
                 apply_socket_override(config, args.socket),
                 lua,
                 create_renderer(args.renderer)?,
+                std::sync::Arc::new(rift::SelectedRiftBackend),
             )?;
             daemon.run().await
         }

@@ -79,7 +79,9 @@ pub fn current_timestamp_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// An item event. Each kind also names the handler slot that receives it, so
+/// this enum is the one list of handler slots.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
     Click,
@@ -88,6 +90,27 @@ pub enum EventKind {
     HoverEnter,
     HoverLeave,
     HoverUpdate,
+}
+
+impl EventKind {
+    /// Every event kind, in handler-slot order.
+    pub const ALL: [Self; 6] = [
+        Self::Click,
+        Self::RightClick,
+        Self::Scroll,
+        Self::HoverEnter,
+        Self::HoverLeave,
+        Self::HoverUpdate,
+    ];
+
+    /// Whether the event comes from the pointer moving over an item.
+    #[must_use]
+    pub const fn is_hover(self) -> bool {
+        matches!(
+            self,
+            Self::HoverEnter | Self::HoverLeave | Self::HoverUpdate
+        )
+    }
 }
 
 impl From<TriggerEvent> for EventKind {

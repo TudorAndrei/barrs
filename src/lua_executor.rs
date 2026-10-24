@@ -12,9 +12,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mlua::{FromLuaMulti, Function, Lua, LuaSerdeExt};
 use serde_json::{Value, json};
-use tokio::sync::{mpsc, oneshot};
 
 use crate::config::{Config, load_config_with_runtime};
+use crate::content::ItemContent;
 use crate::error::BarrsError;
 
 /// Longest time one Lua event handler may run before barrs stops it.
@@ -26,32 +26,25 @@ const DEADLINE_CHECK_INTERVAL: u32 = 10_000;
 /// Largest update result that barrs accepts, measured as serialized JSON.
 const MAX_UPDATE_RESULT_BYTES: usize = 16 * 1024;
 
-/// Result of one Lua update function call for one item.
-pub struct UpdateResult {
-    /// Config generation that requested the update.
-    pub epoch: u64,
-    pub item_id: String,
-    /// Item snapshot data with a string `text`, or the reason the call failed.
-    pub outcome: Result<Value, BarrsError>,
-}
+/// Receives the result of one Lua call on the executor thread.
+type Done<V> = Box<dyn FnOnce(Result<V, BarrsError>) + Send>;
 
 enum Job {
     Handler {
         function: String,
         context: Value,
-        reply: oneshot::Sender<Result<(), BarrsError>>,
+        done: Done<()>,
     },
     Update {
-        epoch: u64,
         item_id: String,
         function: String,
-        results: mpsc::UnboundedSender<UpdateResult>,
+        done: Done<ItemContent>,
     },
 }
 
 /// Handle to the thread that owns one Lua runtime.
 ///
-/// Dropping every handle stops the thread after its current call.
+/// Dropping every handle stops the thread after the calls already queued.
 #[derive(Clone)]
 pub struct LuaExecutor {
     jobs: std_mpsc::Sender<Job>,
@@ -89,46 +82,51 @@ impl LuaExecutor {
         Ok((Self { jobs }, config))
     }
 
-    /// Calls the global Lua function `function` with `context` as its argument.
+    /// Queues a call of the global Lua function `function` with `context` as
+    /// its argument.
     ///
-    /// # Errors
-    ///
-    /// Returns an error when the function is missing, raises an error, runs
-    /// longer than the handler time limit, or the executor has stopped.
-    pub async fn call_handler(&self, function: &str, context: Value) -> Result<(), BarrsError> {
-        let (reply, response) = oneshot::channel();
-        self.jobs
-            .send(Job::Handler {
-                function: function.to_owned(),
-                context,
-                reply,
-            })
-            .map_err(|_| executor_stopped())?;
-        response.await.map_err(|_| executor_stopped())?
+    /// `done` gets the result exactly once: on the executor thread when the
+    /// call ends, or at once with an error when the executor has stopped. The
+    /// call fails when the function is missing, raises an error, or runs
+    /// longer than the handler time limit.
+    pub fn call_handler(
+        &self,
+        function: &str,
+        context: Value,
+        done: impl FnOnce(Result<(), BarrsError>) + Send + 'static,
+    ) {
+        self.submit(Job::Handler {
+            function: function.to_owned(),
+            context,
+            done: Box::new(done),
+        });
     }
 
     /// Queues a call of the update function `function` for `item_id`.
     ///
-    /// The executor sends the [`UpdateResult`] to `results` when the call ends.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the executor has stopped.
+    /// `done` gets the item content, or the reason the call failed, exactly
+    /// once: on the executor thread when the call ends, or at once when the
+    /// executor has stopped.
     pub fn request_update(
         &self,
-        epoch: u64,
         item_id: &str,
         function: &str,
-        results: &mpsc::UnboundedSender<UpdateResult>,
-    ) -> Result<(), BarrsError> {
-        self.jobs
-            .send(Job::Update {
-                epoch,
-                item_id: item_id.to_owned(),
-                function: function.to_owned(),
-                results: results.clone(),
-            })
-            .map_err(|_| executor_stopped())
+        done: impl FnOnce(Result<ItemContent, BarrsError>) + Send + 'static,
+    ) {
+        self.submit(Job::Update {
+            item_id: item_id.to_owned(),
+            function: function.to_owned(),
+            done: Box::new(done),
+        });
+    }
+
+    fn submit(&self, job: Job) {
+        if let Err(std_mpsc::SendError(job)) = self.jobs.send(job) {
+            match job {
+                Job::Handler { done, .. } => done(Err(executor_stopped())),
+                Job::Update { done, .. } => done(Err(executor_stopped())),
+            }
+        }
     }
 }
 
@@ -142,23 +140,13 @@ fn serve(lua: &Lua, jobs: &std_mpsc::Receiver<Job>) {
             Job::Handler {
                 function,
                 context,
-                reply,
-            } => {
-                let _ = reply.send(run_handler(lua, &function, &context));
-            }
+                done,
+            } => done(run_handler(lua, &function, &context)),
             Job::Update {
-                epoch,
                 item_id,
                 function,
-                results,
-            } => {
-                let outcome = run_update(lua, &function, &item_id);
-                let _ = results.send(UpdateResult {
-                    epoch,
-                    item_id,
-                    outcome,
-                });
-            }
+                done,
+            } => done(run_update(lua, &function, &item_id)),
         }
     }
 }
@@ -172,7 +160,7 @@ fn run_handler(lua: &Lua, function: &str, context: &Value) -> Result<(), BarrsEr
     call_with_timeout::<()>(lua, &func, context, HANDLER_TIMEOUT)
 }
 
-fn run_update(lua: &Lua, function: &str, item_id: &str) -> Result<Value, BarrsError> {
+fn run_update(lua: &Lua, function: &str, item_id: &str) -> Result<ItemContent, BarrsError> {
     let func: Function = lua
         .globals()
         .get(function)
@@ -184,14 +172,16 @@ fn run_update(lua: &Lua, function: &str, item_id: &str) -> Result<Value, BarrsEr
         });
     let context = lua.to_value(&json!({ "item_id": item_id, "timestamp_ms": timestamp_ms }))?;
     let returned = call_with_timeout::<mlua::Value>(lua, &func, context, UPDATE_TIMEOUT)?;
-    update_data(lua, returned)
+    update_content(lua, returned)
 }
 
-/// Converts the value an update function returned into item snapshot data.
+/// Converts the value an update function returned into text content.
 ///
-/// A string becomes `{ text = string }`. A table must serialize to a JSON
-/// object with a string `text`; its other fields stay in the snapshot data.
-fn update_data(lua: &Lua, returned: mlua::Value) -> Result<Value, BarrsError> {
+/// A string becomes the text. A table must serialize to a JSON object with a
+/// string `text`; its other fields stay in the item data. The result is always
+/// text content, so a table field such as `workspaces` does not change the
+/// layout.
+fn update_content(lua: &Lua, returned: mlua::Value) -> Result<ItemContent, BarrsError> {
     let data = match returned {
         mlua::Value::String(text) => json!({ "text": &*text.to_str()? }),
         mlua::Value::Table(_) => lua.from_value::<Value>(returned)?,
@@ -202,18 +192,23 @@ fn update_data(lua: &Lua, returned: mlua::Value) -> Result<Value, BarrsError> {
             )));
         }
     };
-    if !data.get("text").is_some_and(Value::is_string) {
-        return Err(BarrsError::Lua(
-            "update result must be a table with a string text field".into(),
-        ));
-    }
     let size = serde_json::to_vec(&data)?.len();
+    let Value::Object(mut fields) = data else {
+        return Err(missing_text());
+    };
+    let Some(Value::String(text)) = fields.remove("text") else {
+        return Err(missing_text());
+    };
     if size > MAX_UPDATE_RESULT_BYTES {
         return Err(BarrsError::Lua(format!(
             "update result is {size} bytes, more than the {MAX_UPDATE_RESULT_BYTES} byte limit"
         )));
     }
-    Ok(data)
+    Ok(ItemContent::Text { text, fields })
+}
+
+fn missing_text() -> BarrsError {
+    BarrsError::Lua("update result must be a table with a string text field".into())
 }
 
 /// Calls `func` and stops it with an error if it runs longer than `timeout`.
@@ -254,7 +249,35 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{LuaExecutor, UpdateResult, call_with_timeout, update_data};
+    use super::{LuaExecutor, call_with_timeout, update_content};
+    use crate::content::ItemContent;
+    use crate::error::BarrsError;
+
+    /// Runs the handler `function` and waits for its result.
+    async fn handle(
+        executor: &LuaExecutor,
+        function: &str,
+        context: serde_json::Value,
+    ) -> Result<(), BarrsError> {
+        let (done, result) = tokio::sync::oneshot::channel();
+        executor.call_handler(function, context, move |outcome| {
+            let _ = done.send(outcome);
+        });
+        result.await.expect("handler result")
+    }
+
+    /// Runs the update function `function` for `item_id` and waits for its result.
+    async fn update(
+        executor: &LuaExecutor,
+        item_id: &str,
+        function: &str,
+    ) -> Result<ItemContent, BarrsError> {
+        let (done, result) = tokio::sync::oneshot::channel();
+        executor.request_update(item_id, function, move |outcome| {
+            let _ = done.send(outcome);
+        });
+        result.await.expect("update result")
+    }
 
     #[test]
     fn call_that_never_returns_is_stopped() {
@@ -292,35 +315,42 @@ return { items = { { id = "clock", handlers = { click = "count" } } } }
 
         let (executor, config) = LuaExecutor::start(&path).expect("start executor");
         assert_eq!(config.items.len(), 1);
-        executor
-            .call_handler("count", json!({ "step": 2 }))
+        handle(&executor, "count", json!({ "step": 2 }))
             .await
             .expect("count");
-        executor
-            .call_handler("count", json!({ "step": 3 }))
+        handle(&executor, "count", json!({ "step": 3 }))
             .await
             .expect("count");
-        executor
-            .call_handler("check", json!({ "expected": 5 }))
+        handle(&executor, "check", json!({ "expected": 5 }))
             .await
             .expect("globals persist between calls");
     }
 
-    fn update_data_for(lua_value: &str) -> Result<serde_json::Value, crate::error::BarrsError> {
+    fn update_content_for(lua_value: &str) -> Result<ItemContent, crate::error::BarrsError> {
         let lua = mlua::Lua::new();
         let value: mlua::Value = lua.load(lua_value).eval().expect("evaluate value");
-        update_data(&lua, value)
+        update_content(&lua, value)
     }
 
     #[test]
-    fn update_data_accepts_strings_and_tables_with_text() {
+    fn update_content_accepts_strings_and_tables_with_text() {
         assert_eq!(
-            update_data_for(r#""42%""#).expect("string"),
-            json!({ "text": "42%" })
+            update_content_for(r#""42%""#).expect("string"),
+            ItemContent::plain("42%")
         );
         assert_eq!(
-            update_data_for(r#"{ text = "42%", icon = "M", used = 42 }"#).expect("table"),
-            json!({ "text": "42%", "icon": "M", "used": 42 })
+            update_content_for(r#"{ text = "42%", icon = "M", used = 42 }"#).expect("table"),
+            ItemContent::plain_with_fields("42%", [("icon", json!("M")), ("used", json!(42))])
+        );
+    }
+
+    #[test]
+    fn update_content_is_text_even_with_a_workspaces_field() {
+        let content = update_content_for(r#"{ text = "1 2", workspaces = { { name = "1" } } }"#)
+            .expect("table");
+        assert_eq!(
+            content,
+            ItemContent::plain_with_fields("1 2", [("workspaces", json!([{ "name": "1" }]))])
         );
     }
 
@@ -335,13 +365,13 @@ return { items = { { id = "clock", handlers = { click = "count" } } } }
             (r#"{ text = string.rep("x", 20000) }"#, "byte limit"),
         ];
         for (value, expected) in cases {
-            let error = update_data_for(value).expect_err(value);
+            let error = update_content_for(value).expect_err(value);
             assert!(error.to_string().contains(expected), "{value}: {error}");
         }
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn update_results_carry_epoch_item_and_context() {
+    async fn update_results_carry_the_item_context() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("barrs.lua");
         fs::write(
@@ -354,23 +384,14 @@ return { items = { { id = "memory", plugin = { kind = "lua", update = "usage" } 
         )
         .expect("write config");
         let (executor, _) = LuaExecutor::start(&path).expect("start executor");
-        let (results, mut receiver) = tokio::sync::mpsc::unbounded_channel::<UpdateResult>();
 
-        executor
-            .request_update(7, "memory", "usage", &results)
-            .expect("request update");
-        let result = receiver.recv().await.expect("update result");
-        assert_eq!((result.epoch, result.item_id.as_str()), (7, "memory"));
         assert_eq!(
-            result.outcome.expect("outcome"),
-            json!({ "text": "memory", "stamped": true })
+            update(&executor, "memory", "usage").await.expect("outcome"),
+            ItemContent::plain_with_fields("memory", [("stamped", json!(true))])
         );
-
-        executor
-            .request_update(7, "memory", "broken", &results)
-            .expect("request update");
-        let result = receiver.recv().await.expect("update result");
-        let error = result.outcome.expect_err("broken update must fail");
+        let error = update(&executor, "memory", "broken")
+            .await
+            .expect_err("broken update must fail");
         assert!(error.to_string().contains("boom"), "{error}");
     }
 
