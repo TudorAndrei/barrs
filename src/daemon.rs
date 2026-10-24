@@ -759,21 +759,22 @@ mod tests {
     }
 
     struct FailingReconcileRenderer {
-        fail_initialization: Arc<AtomicBool>,
-        initializations: Arc<AtomicUsize>,
+        fail_reconcile: Arc<AtomicBool>,
+        reconciles: Arc<AtomicUsize>,
     }
 
     impl Renderer for FailingReconcileRenderer {
-        fn initialize(
+        fn reconcile(
             &mut self,
             _config: &crate::config::Config,
+            _snapshots: &[crate::render::RenderItemSnapshot],
         ) -> Result<(), crate::error::BarrsError> {
-            if self.fail_initialization.load(Ordering::SeqCst) {
+            if self.fail_reconcile.load(Ordering::SeqCst) {
                 return Err(crate::error::BarrsError::Unsupported(
-                    "renderer initialization failed".into(),
+                    "renderer reconcile failed".into(),
                 ));
             }
-            self.initializations.fetch_add(1, Ordering::SeqCst);
+            self.reconciles.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
@@ -786,10 +787,12 @@ mod tests {
     }
 
     impl Renderer for CountingRenderer {
-        fn initialize(
+        fn reconcile(
             &mut self,
             _config: &crate::config::Config,
+            snapshots: &[crate::render::RenderItemSnapshot],
         ) -> Result<(), crate::error::BarrsError> {
+            self.renders.fetch_add(snapshots.len(), Ordering::SeqCst);
             Ok(())
         }
 
@@ -1887,23 +1890,23 @@ return {{
         let config_path = dir.path().join("barrs.lua");
         write_item_config(&config_path, &socket_path, &["old"]);
 
-        let fail_initialization = Arc::new(AtomicBool::new(false));
-        let initializations = Arc::new(AtomicUsize::new(0));
+        let fail_reconcile = Arc::new(AtomicBool::new(false));
+        let reconciles = Arc::new(AtomicUsize::new(0));
         let renderer = FailingReconcileRenderer {
-            fail_initialization: Arc::clone(&fail_initialization),
-            initializations: Arc::clone(&initializations),
+            fail_reconcile: Arc::clone(&fail_reconcile),
+            reconciles: Arc::clone(&reconciles),
         };
         let config = load_config(&config_path).expect("config");
         let mut daemon = Daemon::new(config_path.clone(), config, renderer).expect("daemon");
         daemon.refresh_all_items().await.expect("initial render");
-        assert_eq!(initializations.load(Ordering::SeqCst), 1);
+        assert_eq!(reconciles.load(Ordering::SeqCst), 1);
 
         write_item_config(&config_path, &socket_path, &["retained"]);
         reload(&mut daemon).await.expect("successful reload");
-        assert_eq!(initializations.load(Ordering::SeqCst), 2);
+        assert_eq!(reconciles.load(Ordering::SeqCst), 2);
 
         write_item_config(&config_path, &socket_path, &["new"]);
-        fail_initialization.store(true, Ordering::SeqCst);
+        fail_reconcile.store(true, Ordering::SeqCst);
         reload(&mut daemon).await.expect_err("reload must fail");
 
         let state = &daemon.state;
@@ -1912,7 +1915,7 @@ return {{
         assert!(!state.item_states.contains_key("old"));
         assert!(!state.item_states.contains_key("new"));
 
-        assert_eq!(initializations.load(Ordering::SeqCst), 2);
+        assert_eq!(reconciles.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test(flavor = "current_thread")]

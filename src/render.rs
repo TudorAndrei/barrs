@@ -68,35 +68,28 @@ pub enum RendererKind {
 /// Native renderers retain `AppKit` objects and therefore intentionally do not
 /// promise `Send` or `Sync`.
 pub trait Renderer {
-    /// Prepares the renderer for `config`.
+    /// Replaces the whole bar with `config` and its complete `snapshots` set.
+    ///
+    /// This is a transaction (ADR-0010): an implementation builds the next
+    /// state aside and keeps its current state when it returns an error.
+    /// Items that `snapshots` does not contain, and their hover presentation,
+    /// are removed.
     ///
     /// # Errors
     ///
-    /// Returns an error when the renderer cannot create its surfaces.
-    fn initialize(&mut self, _config: &Config) -> Result<(), BarrsError>;
-    /// Draws one item snapshot.
+    /// Returns an error when the renderer cannot create its surfaces or draw
+    /// the next state.
+    fn reconcile(
+        &mut self,
+        config: &Config,
+        snapshots: &[RenderItemSnapshot],
+    ) -> Result<(), BarrsError>;
+    /// Draws a new snapshot of one item of the current config.
     ///
     /// # Errors
     ///
     /// Returns an error when the renderer cannot draw the item.
     fn render_item(&mut self, snapshot: &RenderItemSnapshot) -> Result<(), BarrsError>;
-    /// Reinitializes the renderer and draws all `snapshots`.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first error from [`Renderer::initialize`] or
-    /// [`Renderer::render_item`].
-    fn reconcile(
-        &mut self,
-        config: &Config,
-        snapshots: &[RenderItemSnapshot],
-    ) -> Result<(), BarrsError> {
-        self.initialize(config)?;
-        for snapshot in snapshots {
-            self.render_item(snapshot)?;
-        }
-        Ok(())
-    }
     /// Returns the input events collected since the last call.
     ///
     /// # Errors
@@ -116,20 +109,16 @@ pub trait Renderer {
 }
 
 impl<T: Renderer + ?Sized> Renderer for Box<T> {
-    fn initialize(&mut self, config: &Config) -> Result<(), BarrsError> {
-        (**self).initialize(config)
-    }
-
-    fn render_item(&mut self, snapshot: &RenderItemSnapshot) -> Result<(), BarrsError> {
-        (**self).render_item(snapshot)
-    }
-
     fn reconcile(
         &mut self,
         config: &Config,
         snapshots: &[RenderItemSnapshot],
     ) -> Result<(), BarrsError> {
         (**self).reconcile(config, snapshots)
+    }
+
+    fn render_item(&mut self, snapshot: &RenderItemSnapshot) -> Result<(), BarrsError> {
+        (**self).render_item(snapshot)
     }
 
     fn drain_events(&mut self) -> Result<Vec<EventPayload>, BarrsError> {
@@ -434,28 +423,6 @@ impl Default for NativeSurfaceState {
 }
 
 impl NativeSurfaceState {
-    fn retain_configured_items(&mut self, config: &Config) -> bool {
-        let previous_len = self.items.len();
-        self.items.retain(|item| {
-            config
-                .items
-                .iter()
-                .any(|configured| configured.id == item.snapshot.id)
-        });
-        if self
-            .active_hover_item
-            .as_ref()
-            .is_some_and(|item_id| !self.items.iter().any(|item| &item.snapshot.id == item_id))
-        {
-            self.active_hover_item = None;
-        }
-        let changed = self.items.len() != previous_len;
-        if changed {
-            self.relayout();
-        }
-        changed
-    }
-
     fn update_snapshot(&mut self, snapshot: RenderItemSnapshot, bar_height: f64) {
         self.bar_height = bar_height;
         self.items.retain(|item| item.snapshot.id != snapshot.id);
@@ -677,6 +644,9 @@ trait NativeHost {
     }
 }
 
+/// The host without a window: tests use it, and the native renderer uses it
+/// where `AppKit` is not available.
+#[cfg(any(test, not(target_os = "macos")))]
 #[derive(Default)]
 struct MockNativeHost {
     last_scene: Option<BarScene>,
@@ -685,23 +655,22 @@ struct MockNativeHost {
     runtime: HostRuntimeState,
 }
 
+#[cfg(test)]
 impl MockNativeHost {
-    #[cfg(test)]
     const fn last_scene(&self) -> Option<&BarScene> {
         self.last_scene.as_ref()
     }
 
-    #[cfg(test)]
     fn last_commands(&self) -> &[HostCommand] {
         &self.last_commands
     }
 
-    #[cfg(test)]
     const fn runtime(&self) -> &HostRuntimeState {
         &self.runtime
     }
 }
 
+#[cfg(any(test, not(target_os = "macos")))]
 impl NativeHost for MockNativeHost {
     fn initialize(&mut self, _config: &Config) -> Result<(), BarrsError> {
         Ok(())
@@ -1854,6 +1823,7 @@ impl NativeRenderer {
     }
 }
 
+#[cfg(test)]
 impl Default for NativeRenderer {
     fn default() -> Self {
         Self::new(Box::new(MockNativeHost::default()))
@@ -1861,20 +1831,6 @@ impl Default for NativeRenderer {
 }
 
 impl Renderer for NativeRenderer {
-    fn initialize(&mut self, config: &Config) -> Result<(), BarrsError> {
-        let removed_items = self.state.retain_configured_items(config);
-        self.state.bar_height = BAR_HEIGHT;
-        self.state.item_spacing = f64::from(config.bar.spacing);
-        self.config = Some(config.clone());
-        self.host.initialize(config)?;
-        let layout = self.host.layout_geometry(config, self.state.bar_height)?;
-        self.state.set_layout_geometry(layout);
-        if removed_items {
-            self.publish_scene()?;
-        }
-        Ok(())
-    }
-
     fn render_item(&mut self, snapshot: &RenderItemSnapshot) -> Result<(), BarrsError> {
         self.state
             .update_snapshot(snapshot.clone(), self.state.bar_height.max(1.0));
@@ -1938,10 +1894,6 @@ impl Renderer for NativeRenderer {
 pub struct NoopRenderer;
 
 impl Renderer for NoopRenderer {
-    fn initialize(&mut self, _config: &Config) -> Result<(), BarrsError> {
-        Ok(())
-    }
-
     fn render_item(&mut self, _snapshot: &RenderItemSnapshot) -> Result<(), BarrsError> {
         Ok(())
     }
@@ -2394,7 +2346,7 @@ mod tests {
             },
             ..Config::default()
         };
-        renderer.initialize(&config).expect("initialize");
+        renderer.reconcile(&config, &[]).expect("reconcile");
         renderer
             .render_item(&RenderItemSnapshot {
                 id: "cpu".into(),
@@ -2443,8 +2395,8 @@ mod tests {
     fn synthetic_hover_targets_the_requested_item_id() {
         let mut renderer = NativeRenderer::new(Box::new(MockNativeHost::default()));
         renderer
-            .initialize(&Config::default())
-            .expect("initialize renderer");
+            .reconcile(&Config::default(), &[])
+            .expect("reconcile");
         renderer
             .render_item(&test_snapshot("a", 0, Some("left"), "A"))
             .expect("render first item");
@@ -2535,7 +2487,9 @@ mod tests {
     #[test]
     fn native_renderer_preserves_order_within_sections() {
         let mut renderer = NativeRenderer::new(Box::new(MockNativeHost::default()));
-        renderer.initialize(&Config::default()).expect("initialize");
+        renderer
+            .reconcile(&Config::default(), &[])
+            .expect("reconcile");
 
         for snapshot in [
             RenderItemSnapshot {
@@ -2615,14 +2569,17 @@ mod tests {
     fn layout_positions_left_middle_and_right_sections_independently() {
         let mut renderer = NativeRenderer::new(Box::new(MockNativeHost::default()));
         renderer
-            .initialize(&Config {
-                bar: crate::config::BarConfig {
-                    spacing: 4,
-                    ..crate::config::BarConfig::default()
+            .reconcile(
+                &Config {
+                    bar: crate::config::BarConfig {
+                        spacing: 4,
+                        ..crate::config::BarConfig::default()
+                    },
+                    ..Config::default()
                 },
-                ..Config::default()
-            })
-            .expect("initialize");
+                &[],
+            )
+            .expect("reconcile");
         renderer.state.set_layout_geometry(super::LayoutGeometry {
             bar_width: 300.0,
             safe_left: 10.0,
@@ -2663,14 +2620,17 @@ mod tests {
     fn layout_splits_middle_items_around_reserved_center_gap() {
         let mut renderer = NativeRenderer::new(Box::new(MockNativeHost::default()));
         renderer
-            .initialize(&Config {
-                bar: crate::config::BarConfig {
-                    spacing: 4,
-                    ..crate::config::BarConfig::default()
+            .reconcile(
+                &Config {
+                    bar: crate::config::BarConfig {
+                        spacing: 4,
+                        ..crate::config::BarConfig::default()
+                    },
+                    ..Config::default()
                 },
-                ..Config::default()
-            })
-            .expect("initialize");
+                &[],
+            )
+            .expect("reconcile");
         renderer.state.set_layout_geometry(super::LayoutGeometry {
             bar_width: 300.0,
             safe_left: 0.0,
@@ -2702,7 +2662,9 @@ mod tests {
     #[test]
     fn host_scene_plan_uses_full_layout_width() {
         let mut renderer = NativeRenderer::new(Box::new(MockNativeHost::default()));
-        renderer.initialize(&Config::default()).expect("initialize");
+        renderer
+            .reconcile(&Config::default(), &[])
+            .expect("reconcile");
         renderer.state.set_layout_geometry(super::LayoutGeometry {
             bar_width: 320.0,
             safe_left: 0.0,
@@ -2895,7 +2857,9 @@ mod tests {
             scenes: Arc::clone(&scenes),
         };
         let mut renderer = NativeRenderer::new(Box::new(host));
-        renderer.initialize(&Config::default()).expect("initialize");
+        renderer
+            .reconcile(&Config::default(), &[])
+            .expect("reconcile");
 
         renderer
             .render_item(&test_snapshot("clock", 0, Some("right"), "12:00"))
@@ -2918,7 +2882,9 @@ mod tests {
             scenes: Arc::clone(&scenes),
         };
         let mut renderer = NativeRenderer::new(Box::new(host));
-        renderer.initialize(&Config::default()).expect("initialize");
+        renderer
+            .reconcile(&Config::default(), &[])
+            .expect("reconcile");
 
         let events = renderer.drain_events().expect("drain events");
 
@@ -2963,14 +2929,17 @@ mod tests {
     fn layout_handles_missing_sections_and_zero_spacing() {
         let mut renderer = NativeRenderer::new(Box::new(MockNativeHost::default()));
         renderer
-            .initialize(&Config {
-                bar: crate::config::BarConfig {
-                    spacing: 0,
-                    ..crate::config::BarConfig::default()
+            .reconcile(
+                &Config {
+                    bar: crate::config::BarConfig {
+                        spacing: 0,
+                        ..crate::config::BarConfig::default()
+                    },
+                    ..Config::default()
                 },
-                ..Config::default()
-            })
-            .expect("initialize");
+                &[],
+            )
+            .expect("reconcile");
         renderer.state.set_layout_geometry(super::LayoutGeometry {
             bar_width: 200.0,
             safe_left: 0.0,
@@ -2992,14 +2961,17 @@ mod tests {
     fn layout_keeps_wide_middle_section_outside_reserved_gap() {
         let mut renderer = NativeRenderer::new(Box::new(MockNativeHost::default()));
         renderer
-            .initialize(&Config {
-                bar: crate::config::BarConfig {
-                    spacing: 4,
-                    ..crate::config::BarConfig::default()
+            .reconcile(
+                &Config {
+                    bar: crate::config::BarConfig {
+                        spacing: 4,
+                        ..crate::config::BarConfig::default()
+                    },
+                    ..Config::default()
                 },
-                ..Config::default()
-            })
-            .expect("initialize");
+                &[],
+            )
+            .expect("reconcile");
         renderer.state.set_layout_geometry(super::LayoutGeometry {
             bar_width: 120.0,
             safe_left: 0.0,
@@ -3038,15 +3010,18 @@ mod tests {
     fn updating_percentage_item_does_not_shift_following_items() {
         let mut renderer = NativeRenderer::new(Box::new(MockNativeHost::default()));
         renderer
-            .initialize(&Config {
-                bar: crate::config::BarConfig {
-                    spacing: 0,
-                    background: None,
-                    ..crate::config::BarConfig::default()
+            .reconcile(
+                &Config {
+                    bar: crate::config::BarConfig {
+                        spacing: 0,
+                        background: None,
+                        ..crate::config::BarConfig::default()
+                    },
+                    ..Config::default()
                 },
-                ..Config::default()
-            })
-            .expect("initialize");
+                &[],
+            )
+            .expect("reconcile");
 
         let cpu = RenderItemSnapshot {
             id: "cpu".into(),
@@ -3202,15 +3177,18 @@ mod tests {
     fn native_renderer_publishes_hover_scene() {
         let mut renderer = NativeRenderer::new(Box::new(MockNativeHost::default()));
         renderer
-            .initialize(&Config {
-                bar: crate::config::BarConfig {
-                    spacing: 4,
-                    background: None,
-                    ..crate::config::BarConfig::default()
+            .reconcile(
+                &Config {
+                    bar: crate::config::BarConfig {
+                        spacing: 4,
+                        background: None,
+                        ..crate::config::BarConfig::default()
+                    },
+                    ..Config::default()
                 },
-                ..Config::default()
-            })
-            .expect("initialize");
+                &[],
+            )
+            .expect("reconcile");
         renderer
             .render_item(&RenderItemSnapshot {
                 id: "time".into(),
@@ -3260,8 +3238,8 @@ mod tests {
             presentations: Arc::clone(&presentations),
         }));
         renderer
-            .initialize(&config_with_item_ids(&["clock"]))
-            .expect("initialize");
+            .reconcile(&config_with_item_ids(&["clock"]), &[])
+            .expect("reconcile");
         renderer
             .render_item(&test_snapshot("clock", 0, Some("left"), "12:00"))
             .expect("render");
