@@ -100,6 +100,12 @@ impl RiftTracker {
         }
     }
 
+    /// When the running debounce cycle is due, if one runs.
+    #[must_use]
+    pub const fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
     /// Ends a due debounce cycle.
     ///
     /// Returns the snapshot that the Rift consumers must render, and records

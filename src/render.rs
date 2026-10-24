@@ -5,8 +5,9 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 #[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 #[cfg(target_os = "macos")]
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
@@ -53,6 +54,13 @@ const ITEM_TEXT_HEIGHT: f64 = 24.0;
 const ITEM_TRAILING_TEXT_PADDING: f64 = 0.0;
 const BAR_HEIGHT: f64 = 28.0;
 const DEFAULT_ITEM_SPACING: f64 = 6.0;
+/// The wait between event polls while the pointer is on or near the bar.
+pub const ACTIVE_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+/// The wait between event polls while the pointer is away from the bar.
+pub const IDLE_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// How far from the bar, in points, the pointer counts as near it.
+#[cfg(target_os = "macos")]
+const POINTER_NEAR_BAR_MARGIN: f64 = 48.0;
 #[cfg(target_os = "macos")]
 const DISPLAY_RECONFIGURATION_SETTLE_MS: u64 = 500;
 #[cfg(target_os = "macos")]
@@ -100,6 +108,11 @@ pub trait Renderer {
     fn drain_events(&mut self) -> Result<Vec<EventPayload>, BarrsError> {
         Ok(Vec::new())
     }
+    /// How long the caller can wait before it calls [`Self::drain_events`]
+    /// again and still deliver input on time.
+    fn event_poll_interval(&self) -> Duration {
+        ACTIVE_EVENT_POLL_INTERVAL
+    }
     /// Applies an event to the renderer state.
     ///
     /// # Errors
@@ -125,6 +138,10 @@ impl<T: Renderer + ?Sized> Renderer for Box<T> {
 
     fn drain_events(&mut self) -> Result<Vec<EventPayload>, BarrsError> {
         (**self).drain_events()
+    }
+
+    fn event_poll_interval(&self) -> Duration {
+        (**self).event_poll_interval()
     }
 
     fn handle_event(&mut self, event: &EventPayload) -> Result<(), BarrsError> {
@@ -657,6 +674,9 @@ trait NativeHost {
     fn drain_events(&mut self) -> Result<Vec<EventPayload>, BarrsError> {
         Ok(Vec::new())
     }
+    fn event_poll_interval(&self) -> Duration {
+        ACTIVE_EVENT_POLL_INTERVAL
+    }
 }
 
 /// The host without a window: tests use it, and the native renderer uses it
@@ -769,6 +789,19 @@ impl NativeHost for AppKitHost {
 
     fn drain_events(&mut self) -> Result<Vec<EventPayload>, BarrsError> {
         objc2::rc::autoreleasepool(|_| self.drain_events_in_pool())
+    }
+
+    /// Polls fast while the pointer is on or near the bar, so hovers and
+    /// clicks respond at once, and while a display change settles.
+    fn event_poll_interval(&self) -> Duration {
+        if self.pointer_item.is_some()
+            || self.display_reconfiguration_deadline.is_some()
+            || self.pointer_near_bar()
+        {
+            ACTIVE_EVENT_POLL_INTERVAL
+        } else {
+            IDLE_EVENT_POLL_INTERVAL
+        }
     }
 }
 
@@ -967,6 +1000,16 @@ impl AppKitHost {
         Ok(self
             .bar_screen_geometry()?
             .map(|screen| ScreenSignature::from(&screen)))
+    }
+
+    fn pointer_near_bar(&self) -> bool {
+        let (Some(window), Some(location)) = (&self.window, self.pointer_location) else {
+            return false;
+        };
+        let size = window.frame().size;
+        (0.0..=size.width).contains(&location.x)
+            && (-POINTER_NEAR_BAR_MARGIN..=size.height + POINTER_NEAR_BAR_MARGIN)
+                .contains(&location.y)
     }
 
     fn prepare_for_target_display(&mut self) -> Result<(), BarrsError> {
@@ -1931,6 +1974,10 @@ impl Renderer for NativeRenderer {
         Ok(events)
     }
 
+    fn event_poll_interval(&self) -> Duration {
+        self.host.event_poll_interval()
+    }
+
     fn handle_event(&mut self, event: &EventPayload) -> Result<(), BarrsError> {
         if self.state.handle_event(event) {
             self.publish_scene()?;
@@ -1945,6 +1992,11 @@ pub struct NoopRenderer;
 impl Renderer for NoopRenderer {
     fn render_item(&mut self, _snapshot: &RenderItemSnapshot) -> Result<(), BarrsError> {
         Ok(())
+    }
+
+    /// The noop renderer has no input, so its events need no fast poll.
+    fn event_poll_interval(&self) -> Duration {
+        IDLE_EVENT_POLL_INTERVAL
     }
 
     fn reconcile(

@@ -24,7 +24,6 @@ use crate::producer::{Completion, ProducedItem, RiftUse, SnapshotProducer};
 use crate::render::{RenderItemSnapshot, Renderer};
 use crate::rift::{RiftBackend, RiftBackendKind};
 
-const EVENT_TICK_MS: u64 = 16;
 const POLL_TICK_MS: u64 = 250;
 const PENDING_IPC_REQUESTS: usize = 64;
 /// Longest time the daemon waits at stop for connection tasks to send replies.
@@ -177,7 +176,7 @@ impl<R: Renderer> Daemon<R> {
         }
         signal_startup_ready();
         let (request_sender, mut request_receiver) = mpsc::channel(PENDING_IPC_REQUESTS);
-        let mut event_tick = time::interval(Duration::from_millis(EVENT_TICK_MS));
+        let mut next_event_poll = Instant::now();
         let mut poll_tick = time::interval(Duration::from_millis(POLL_TICK_MS));
         let mut connections = tokio::task::JoinSet::new();
 
@@ -213,13 +212,14 @@ impl<R: Renderer> Daemon<R> {
                         break;
                     }
                 }
-                _ = event_tick.tick() => {
+                () = time::sleep_until(next_event_poll) => {
                     if let Err(error) = self.process_renderer_events() {
                         eprintln!("barrs: renderer event processing failed: {error}");
                     }
-                    if let Err(error) = self.process_rift_events(Instant::now()) {
-                        eprintln!("barrs: rift event processing failed: {error}");
-                    }
+                    let now = Instant::now();
+                    next_event_poll = now
+                        .checked_add(self.state.bar.event_poll_interval())
+                        .unwrap_or(now);
                 }
                 _ = poll_tick.tick() => {
                     self.refresh_due_items();
@@ -423,8 +423,10 @@ impl<R: Renderer> Daemon<R> {
     /// Results for an older config generation or a superseded reload are
     /// discarded.
     fn apply_completion(&mut self, completion: Completion<Purpose>) -> Result<(), BarrsError> {
-        let Completion::Items(production) = completion else {
-            return Ok(());
+        let production = match completion {
+            Completion::Items(production) => production,
+            Completion::RiftResync => return Ok(()),
+            Completion::RiftPending => return self.process_rift_events(Instant::now()),
         };
         let (purpose, items, rift) = production.into_parts();
         match purpose {

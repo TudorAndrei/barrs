@@ -5,7 +5,6 @@ use std::ffi::CString;
 use std::hash::{Hash, Hasher};
 #[cfg(target_os = "macos")]
 use std::mem::size_of;
-use std::sync::mpsc;
 #[cfg(target_os = "macos")]
 use std::thread;
 use std::time::Duration;
@@ -89,15 +88,24 @@ type SubscriptionHandle = libc::mach_port_t;
 type SubscriptionHandle = u32;
 
 pub struct RiftSubscription {
-    receiver: mpsc::Receiver<RiftEvent>,
+    receiver: tokio::sync::mpsc::UnboundedReceiver<RiftEvent>,
     handles: Vec<SubscriptionHandle>,
     _workers: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl RiftSubscription {
-    #[must_use]
-    pub fn drain(&self) -> Vec<RiftEvent> {
-        self.receiver.try_iter().collect()
+    /// The events that arrived since the last call.
+    pub fn drain(&mut self) -> Vec<RiftEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = self.receiver.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    /// Waits for the next event, or returns `None` when every worker ended.
+    pub async fn recv(&mut self) -> Option<RiftEvent> {
+        self.receiver.recv().await
     }
 }
 
@@ -262,7 +270,7 @@ pub fn subscribe() -> Option<RiftSubscription> {
             return None;
         }
 
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut handles = Vec::new();
         let mut workers = Vec::new();
 
