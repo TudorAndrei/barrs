@@ -65,7 +65,11 @@ platform paths.
 
 `src/rift.rs` selects the Rift Mach backend when available, otherwise the Rift
 CLI backend. It supplies workspace and layout snapshots and can subscribe to
-Rift events so the daemon refreshes affected items. `src/process.rs` provides
+Rift events so the daemon refreshes affected items. The Rift tracker,
+`src/rift_tracker.rs#struct:RiftTracker`, caches the latest snapshot, applies
+events to it, and debounces renders of the Rift consumers. Its poll ends every
+due debounce cycle and asks for a render only when the snapshot signature
+differs from the one the consumers show. `src/process.rs` provides
 bounded child-process execution for platform queries and the CLI fallback.
 
 ## Source map
@@ -81,5 +85,6 @@ bounded child-process execution for platform queries and the CLI fallback.
 - Item content shared by producers and the renderer: `src/content.rs`
 - Rendering model and native AppKit host: `src/render.rs`
 - Rift backends and event application: `src/rift.rs`
+- Rift snapshot cache and render debounce: `src/rift_tracker.rs`
 - Timed subprocess helper: `src/process.rs`
 - Shared application errors: `src/error.rs`

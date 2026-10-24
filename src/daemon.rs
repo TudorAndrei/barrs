@@ -18,14 +18,11 @@ use crate::ipc::{
 };
 use crate::lua_executor::{LuaExecutor, UpdateResult};
 use crate::render::{RenderItemSnapshot, Renderer};
-use crate::rift::{
-    RiftApplyResult, RiftBackendKind, RiftSnapshot, RiftSubscription, apply_event, select_backend,
-    subscribe,
-};
+use crate::rift::{RiftBackendKind, RiftSnapshot, RiftSubscription, select_backend, subscribe};
+use crate::rift_tracker::{RiftEventsOutcome, RiftTracker};
 
 const EVENT_TICK_MS: u64 = 16;
 const POLL_TICK_MS: u64 = 250;
-const RIFT_DEBOUNCE_MS: u64 = 16;
 const PENDING_IPC_REQUESTS: usize = 64;
 /// Longest time the daemon waits at stop for connection tasks to send replies.
 const CONNECTION_DRAIN_MS: u64 = 250;
@@ -87,10 +84,7 @@ struct DaemonState<R: Renderer> {
     lua: LuaExecutor,
     backend: RiftBackendKind,
     rift_subscription: Option<RiftSubscription>,
-    rift_snapshot: Option<RiftSnapshot>,
-    rift_dirty: bool,
-    rift_debounce_deadline: Option<Instant>,
-    last_rift_signature: Option<u64>,
+    rift: RiftTracker,
     renderer: R,
     item_states: HashMap<String, RenderItemSnapshot>,
     refresh_deadlines: HashMap<String, Instant>,
@@ -120,10 +114,7 @@ impl<R: Renderer> Daemon<R> {
             lua,
             backend: backend_kind,
             rift_subscription,
-            rift_snapshot: None,
-            rift_dirty: false,
-            rift_debounce_deadline: None,
-            last_rift_signature: None,
+            rift: RiftTracker::new(),
             renderer,
             item_states: HashMap::new(),
             updates_in_flight: HashSet::new(),
@@ -285,7 +276,6 @@ impl<R: Renderer> Daemon<R> {
         let backend = select_backend();
         let backend_kind = backend.kind();
         let rift_snapshot = backend.snapshot().ok();
-        let rift_signature = rift_snapshot.as_ref().map(RiftSnapshot::signature);
         let next_states = snapshots_for_config(&config, rift_snapshot.as_ref())?;
         let state = &mut self.state;
         state.renderer.reconcile(&config, &next_states)?;
@@ -297,16 +287,11 @@ impl<R: Renderer> Daemon<R> {
         state.refresh_deadlines =
             build_refresh_deadlines(&state.config, Instant::now(), state.backend);
         state.rift_subscription = rift_subscription_for(&state.config);
-        state.rift_snapshot = None;
-        state.rift_dirty = false;
-        state.rift_debounce_deadline = None;
-        state.last_rift_signature = None;
+        state.rift.reset(rift_snapshot);
         state.item_states = next_states
             .into_iter()
             .map(|snapshot| (snapshot.id.clone(), snapshot))
             .collect();
-        state.rift_snapshot = rift_snapshot;
-        state.last_rift_signature = rift_signature;
 
         Ok(())
     }
@@ -314,17 +299,13 @@ impl<R: Renderer> Daemon<R> {
     fn refresh_all_items(&mut self) -> Result<(), BarrsError> {
         let state = &mut self.state;
         let rift_snapshot = select_backend().snapshot().ok();
-        let rift_signature = rift_snapshot.as_ref().map(RiftSnapshot::signature);
         let next_states = snapshots_for_config(&state.config, rift_snapshot.as_ref())?;
         state.renderer.reconcile(&state.config, &next_states)?;
         state.item_states = next_states
             .into_iter()
             .map(|snapshot| (snapshot.id.clone(), snapshot))
             .collect();
-        state.rift_snapshot = rift_snapshot;
-        state.rift_dirty = false;
-        state.rift_debounce_deadline = None;
-        state.last_rift_signature = rift_signature;
+        state.rift.reset(rift_snapshot);
 
         Ok(())
     }
@@ -346,7 +327,7 @@ impl<R: Renderer> Daemon<R> {
 
         let config = self.state.config.clone();
         let epoch = self.state.config_epoch;
-        let cached_rift_snapshot = self.state.rift_snapshot.clone();
+        let cached_rift_snapshot = self.state.rift.snapshot().cloned();
         let needs_rift = due_items.iter().any(|item_id| {
             item_by_id(&config, item_id).is_some_and(|item| item.source.needs_rift())
         });
@@ -479,92 +460,26 @@ impl<R: Renderer> Daemon<R> {
             .as_ref()
             .map(RiftSubscription::drain)
             .unwrap_or_default();
-
-        if !events.is_empty() {
-            if state.rift_snapshot.is_none() {
-                state.rift_snapshot = select_backend().snapshot().ok();
-            }
-            let mut changed = false;
-            let mut requires_resync = false;
-            if let Some(snapshot) = state.rift_snapshot.as_mut() {
-                for event in events {
-                    match apply_event(snapshot, &event) {
-                        RiftApplyResult::NoChange => {}
-                        RiftApplyResult::Updated => changed = true,
-                        RiftApplyResult::RequiresResync => {
-                            requires_resync = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            if requires_resync {
-                state.rift_snapshot = select_backend().snapshot().ok();
-            }
-            if let Some(transition) = rift_debounce_transition(
-                changed,
-                requires_resync,
-                state.rift_snapshot.is_some(),
-                now,
-            ) {
-                state.rift_dirty = transition.dirty;
-                state.rift_debounce_deadline = transition.deadline;
+        if state.rift.on_events(&events, now) == RiftEventsOutcome::NeedsSnapshot {
+            match select_backend().snapshot() {
+                Ok(snapshot) => state.rift.store(snapshot, now),
+                Err(_) => state.rift.invalidate(),
             }
         }
 
-        let should_refresh = rift_debounce_due(state.rift_dirty, state.rift_debounce_deadline, now);
-        if !should_refresh {
-            return Ok(());
-        }
-
-        let item_ids = state
-            .config
-            .items
-            .iter()
-            .filter(|item| item.source.needs_rift())
-            .map(|item| item.id.clone())
-            .collect::<Vec<_>>();
-
-        if item_ids.is_empty() {
-            finish_rift_debounce(state);
-            return Ok(());
-        }
-
-        let Some(rift_snapshot) = state.rift_snapshot.as_ref() else {
-            finish_rift_debounce(state);
+        let Some(rift_snapshot) = state.rift.poll(now, has_rift_items(&state.config)) else {
             return Ok(());
         };
-        let next_signature = rift_snapshot.signature();
-        if !rift_signature_changed(state.last_rift_signature, next_signature) {
-            finish_rift_debounce(state);
-            return Ok(());
-        }
-
-        self.refresh_selected_items_with_rift(&item_ids)?;
-
-        finish_rift_debounce(&mut self.state);
-        self.state.last_rift_signature = Some(next_signature);
-        Ok(())
-    }
-
-    fn refresh_selected_items_with_rift(&mut self, item_ids: &[String]) -> Result<(), BarrsError> {
-        let state = &mut self.state;
-        let mut next_states = HashMap::new();
-
         for (order, item) in state
             .config
             .items
             .iter()
             .enumerate()
-            .filter(|(_, item)| item_ids.iter().any(|item_id| item_id == &item.id))
+            .filter(|(_, item)| item.source.needs_rift())
         {
-            let snapshot = snapshot_for_item(item, order, state.rift_snapshot.as_ref())?;
-            next_states.insert(item.id.clone(), snapshot);
-        }
-
-        for (item_id, snapshot) in next_states {
+            let snapshot = snapshot_for_item(item, order, Some(rift_snapshot))?;
             state.renderer.render_item(&snapshot)?;
-            state.item_states.insert(item_id, snapshot);
+            state.item_states.insert(item.id.clone(), snapshot);
         }
         Ok(())
     }
@@ -603,7 +518,7 @@ impl<R: Renderer> Daemon<R> {
                 };
                 let rift_snapshot = fresh_rift_snapshot
                     .as_ref()
-                    .or(state.rift_snapshot.as_ref());
+                    .or_else(|| state.rift.snapshot());
                 let snapshot = snapshot_for_item(item, order, rift_snapshot)?;
                 state.renderer.render_item(&snapshot)?;
                 state.item_states.insert(item.id.clone(), snapshot);
@@ -730,38 +645,6 @@ fn advance_refresh_deadlines(
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct RiftDebounceTransition {
-    dirty: bool,
-    deadline: Option<Instant>,
-}
-
-fn rift_debounce_transition(
-    changed: bool,
-    requires_resync: bool,
-    snapshot_available: bool,
-    now: Instant,
-) -> Option<RiftDebounceTransition> {
-    if requires_resync {
-        return Some(RiftDebounceTransition {
-            dirty: snapshot_available,
-            deadline: now.checked_add(Duration::from_millis(RIFT_DEBOUNCE_MS)),
-        });
-    }
-    changed.then(|| RiftDebounceTransition {
-        dirty: true,
-        deadline: now.checked_add(Duration::from_millis(RIFT_DEBOUNCE_MS)),
-    })
-}
-
-fn rift_debounce_due(dirty: bool, deadline: Option<Instant>, now: Instant) -> bool {
-    dirty && deadline.is_some_and(|deadline| deadline <= now)
-}
-
-fn rift_signature_changed(last_signature: Option<u64>, next_signature: u64) -> bool {
-    last_signature != Some(next_signature)
-}
-
 fn item_refresh_interval(item: &ItemConfig, backend: RiftBackendKind) -> Option<Duration> {
     item.interval
         .map(|interval| Duration::from_secs(interval.max(1)))
@@ -787,11 +670,6 @@ fn rift_subscription_for(config: &Config) -> Option<RiftSubscription> {
 
 fn has_rift_items(config: &Config) -> bool {
     config.items.iter().any(|item| item.source.needs_rift())
-}
-
-const fn finish_rift_debounce<R: Renderer>(state: &mut DaemonState<R>) {
-    state.rift_dirty = false;
-    state.rift_debounce_deadline = None;
 }
 
 fn snapshots_for_config(
@@ -1016,22 +894,6 @@ return {{
 return {{
   socket_path = "{}",
   items = {{ {items} }}
-}}
-"#,
-                socket_path.display()
-            ),
-        )
-        .expect("write config");
-    }
-
-    fn write_rift_config(path: &Path, socket_path: &Path) {
-        fs::write(
-            path,
-            format!(
-                r#"
-return {{
-  socket_path = "{}",
-  items = {{ {{ id = "workspaces", plugin = {{ kind = "rift_workspaces" }} }} }}
 }}
 "#,
                 socket_path.display()
@@ -1722,84 +1584,6 @@ return {{
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn rift_debounce_clears_when_no_items_consume_rift() {
-        let dir = tempdir().expect("tempdir");
-        let socket_path = dir.path().join("barrs.sock");
-        let config_path = dir.path().join("barrs.lua");
-        write_config(&config_path, &socket_path);
-        let config = load_config(&config_path).expect("config");
-        assert!(!super::has_rift_items(&config));
-        let mut daemon = Daemon::new(config_path, config, NoopRenderer).expect("daemon");
-        {
-            let state = &mut daemon.state;
-            state.rift_dirty = true;
-            state.rift_debounce_deadline = Some(tokio::time::Instant::now());
-            state.rift_snapshot = Some(test_rift_snapshot("one"));
-        }
-
-        daemon.process_rift_events().expect("process events");
-
-        let state = &daemon.state;
-        assert!(!state.rift_dirty);
-        assert_eq!(state.rift_debounce_deadline, None);
-        assert!(state.rift_subscription.is_none());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn rift_debounce_clears_equal_signatures_and_allows_later_change() {
-        let dir = tempdir().expect("tempdir");
-        let socket_path = dir.path().join("barrs.sock");
-        let config_path = dir.path().join("barrs.lua");
-        write_rift_config(&config_path, &socket_path);
-        let config = load_config(&config_path).expect("config");
-        assert!(super::has_rift_items(&config));
-        let mut daemon = Daemon::new(config_path, config, NoopRenderer).expect("daemon");
-        let initial = test_rift_snapshot("one");
-        {
-            let state = &mut daemon.state;
-            state.rift_snapshot = Some(initial.clone());
-            state.last_rift_signature = Some(initial.signature());
-            state.rift_dirty = true;
-            state.rift_debounce_deadline = Some(tokio::time::Instant::now());
-        }
-
-        daemon.process_rift_events().expect("equal signature");
-        {
-            let state = &daemon.state;
-            assert!(!state.rift_dirty);
-            assert_eq!(state.rift_debounce_deadline, None);
-        }
-
-        let changed = test_rift_snapshot("two");
-        {
-            let state = &mut daemon.state;
-            state.rift_snapshot = Some(changed.clone());
-            state.rift_dirty = true;
-            state.rift_debounce_deadline = Some(tokio::time::Instant::now());
-        }
-        daemon.process_rift_events().expect("changed signature");
-
-        let state = &daemon.state;
-        assert!(!state.rift_dirty);
-        assert_eq!(state.rift_debounce_deadline, None);
-        assert_eq!(state.last_rift_signature, Some(changed.signature()));
-    }
-
-    fn test_rift_snapshot(current_workspace: &str) -> crate::rift::RiftSnapshot {
-        crate::rift::RiftSnapshot {
-            current_workspace: current_workspace.into(),
-            workspaces: vec![crate::rift::RiftWorkspace {
-                name: current_workspace.into(),
-                is_current: true,
-                window_count: 1,
-                has_windows: true,
-            }],
-            layout: "tiling".into(),
-            window_count: 1,
-        }
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn reload_reconciles_removed_and_renamed_renderer_items() {
         let dir = tempdir().expect("tempdir");
         let socket_path = dir.path().join("barrs.sock");
@@ -2026,44 +1810,6 @@ return {{
         );
         assert_eq!(deadlines["due"], now + std::time::Duration::from_secs(1));
         assert_eq!(deadlines["failed"], now + std::time::Duration::from_secs(1));
-    }
-
-    #[test]
-    fn rift_debounce_transitions_are_deterministic() {
-        let now = tokio::time::Instant::now();
-        let changed = super::rift_debounce_transition(true, false, true, now)
-            .expect("changed event schedules refresh");
-        assert!(changed.dirty);
-        assert_eq!(
-            changed.deadline,
-            Some(now + std::time::Duration::from_millis(super::RIFT_DEBOUNCE_MS))
-        );
-        assert!(!super::rift_debounce_due(true, changed.deadline, now));
-        assert!(super::rift_debounce_due(
-            true,
-            changed.deadline,
-            now + std::time::Duration::from_millis(super::RIFT_DEBOUNCE_MS)
-        ));
-
-        let resync = super::rift_debounce_transition(false, true, true, now)
-            .expect("resync schedules refresh when a snapshot was recovered");
-        assert!(resync.dirty);
-        assert!(super::rift_debounce_transition(false, false, true, now).is_none());
-
-        assert!(super::rift_signature_changed(Some(1), 2));
-        assert!(!super::rift_signature_changed(Some(2), 2));
-
-        // Plan 009 owns terminal cleanup when there are no Rift consumers or a
-        // recovered snapshot has the same signature. Do not treat this state as
-        // a successful publication in this characterization test.
-        let no_snapshot = super::rift_debounce_transition(false, true, false, now)
-            .expect("resync still records its debounce deadline");
-        assert!(!no_snapshot.dirty);
-        assert!(!super::rift_debounce_due(
-            no_snapshot.dirty,
-            no_snapshot.deadline,
-            now + std::time::Duration::from_millis(super::RIFT_DEBOUNCE_MS)
-        ));
     }
 
     #[tokio::test(flavor = "current_thread")]

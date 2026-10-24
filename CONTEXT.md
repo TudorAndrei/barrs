@@ -25,3 +25,15 @@ _Avoid_: snapshot data, payload.
 **Unavailable content**: item content for a source that cannot report a value
 now; it shows the placeholder text and has `available = false` in its data.
 _Avoid_: error item, empty item.
+
+**Rift tracker**: the daemon's cache of the latest Rift snapshot
+(`RiftTracker`). It applies Rift events, asks for a fresh snapshot when an
+event cannot be applied exactly, and debounces renders of the Rift consumers.
+_Avoid_: Rift cache, Rift state.
+
+**Rift consumer**: a configured item whose source is a Rift plugin. _Avoid_:
+Rift item.
+
+**Published signature**: the signature of the Rift snapshot that every Rift
+consumer shows now. A snapshot with another signature needs a render.
+_Avoid_: last signature.
