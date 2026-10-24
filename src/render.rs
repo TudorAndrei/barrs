@@ -240,6 +240,20 @@ pub struct PositionedItemSnapshot {
     pub frame: ItemFrame,
 }
 
+impl PositionedItemSnapshot {
+    /// An item that [`NativeSurfaceState::arrange`] has not placed yet.
+    const fn unplaced(snapshot: RenderItemSnapshot, height: f64) -> Self {
+        Self {
+            snapshot,
+            frame: ItemFrame {
+                x: 0.0,
+                width: 0.0,
+                height,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HoverPresentation {
     pub item_id: String,
@@ -426,14 +440,13 @@ impl NativeSurfaceState {
     fn update_snapshot(&mut self, snapshot: RenderItemSnapshot, bar_height: f64) {
         self.bar_height = bar_height;
         self.items.retain(|item| item.snapshot.id != snapshot.id);
-        self.items.push(PositionedItemSnapshot {
-            snapshot,
-            frame: ItemFrame {
-                x: 0.0,
-                width: 0.0,
-                height: bar_height,
-            },
-        });
+        self.items
+            .push(PositionedItemSnapshot::unplaced(snapshot, bar_height));
+        self.arrange();
+    }
+
+    /// Sorts the items into bar order and lays them out.
+    fn arrange(&mut self) {
         self.items.sort_by(|left, right| {
             section_rank(left.snapshot.placement.as_deref())
                 .cmp(&section_rank(right.snapshot.placement.as_deref()))
@@ -1850,11 +1863,12 @@ impl Renderer for NativeRenderer {
             item_spacing: f64::from(config.bar.spacing),
             layout,
             active_hover_item,
-            items: Vec::new(),
+            items: snapshots
+                .iter()
+                .map(|snapshot| PositionedItemSnapshot::unplaced(snapshot.clone(), BAR_HEIGHT))
+                .collect(),
         };
-        for snapshot in snapshots {
-            next_state.update_snapshot(snapshot.clone(), BAR_HEIGHT);
-        }
+        next_state.arrange();
         if next_state
             .active_hover_item
             .as_ref()
