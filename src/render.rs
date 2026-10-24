@@ -723,6 +723,8 @@ struct AppKitHost {
     item_views: HashMap<String, AppKitItemView>,
     pending_events: Vec<EventPayload>,
     pointer_item: Option<String>,
+    /// The pointer location, in window coordinates, at the last hover poll.
+    pointer_location: Option<NSPoint>,
     background: Option<String>,
     current_screen_signature: Option<ScreenSignature>,
     /// The bar screen geometry; a display reconfiguration clears it.
@@ -1061,6 +1063,8 @@ impl AppKitHost {
         };
 
         let location = window.mouseLocationOutsideOfEventStream();
+        let moved = self.pointer_location != Some(location);
+        self.pointer_location = Some(location);
         let next_item = self.last_scene.as_ref().and_then(|scene| {
             scene.items.iter().find_map(|item| {
                 if item.frame.contains(location.x, location.y) {
@@ -1072,6 +1076,7 @@ impl AppKitHost {
         });
 
         match (self.pointer_item.clone(), next_item) {
+            (Some(previous), Some(next)) if previous == next && !moved => Vec::new(),
             (Some(previous), Some(next)) if previous == next => {
                 vec![synthetic_event_payload(
                     next,

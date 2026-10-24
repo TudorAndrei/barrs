@@ -142,6 +142,9 @@ called for its matching event:
 | `hover_leave` | `hover_leave` |
 | `hover_update` | `hover_update` |
 
+The bar sends `hover_update` when the pointer moves over the item it
+hovers; a pointer that does not move sends no update.
+
 Each function receives one `ctx` table:
 
 ```lua
