@@ -88,6 +88,18 @@ cargo run -- start --config barrs.lua
 In debug builds, `start` stays attached to the terminal so you can iterate
 without a detached background process.
 
+### Tests
+
+`cargo test` runs the unit tests and the Cucumber features. The features in
+`tests/features/` describe the behavior of barrs in Gherkin:
+
+- `tests/features/config/` loads Lua configs (`tests/config.rs`).
+- `tests/features/daemon/` starts the `barrs` binary with the no-op renderer
+  and drives it with the `barrs` commands (`tests/daemon.rs`).
+
+Run one domain with `cargo test --test config` or `cargo test --test daemon`.
+Add `-- --name <regex>` to run matching scenarios only.
+
 ## Configuration
 
 On first start, `barrs` creates a default config at:
