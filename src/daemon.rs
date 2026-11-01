@@ -724,7 +724,7 @@ mod tests {
     };
 
     use tempfile::tempdir;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::AsyncWriteExt;
     use tokio::net::UnixStream;
     use tokio::task::JoinHandle;
 
@@ -1020,35 +1020,6 @@ return {{
         }
     }
 
-    fn write_trigger_config(path: &Path, socket_path: &Path, marker_path: &Path) {
-        fs::write(
-            path,
-            format!(
-                r#"
-function handle_click(ctx)
-  local file = io.open([=[{}]=], "w")
-  file:write(ctx.item_id .. ":" .. ctx.event)
-  file:close()
-end
-
-return {{
-  socket_path = "{}",
-  items = {{
-    {{
-      id = "clock",
-      label = "clock",
-      handlers = {{ click = "handle_click" }}
-    }}
-  }}
-}}
-"#,
-                marker_path.display(),
-                socket_path.display()
-            ),
-        )
-        .expect("write config");
-    }
-
     fn write_counter_config(path: &Path, socket_path: &Path, marker_path: &Path) {
         fs::write(
             path,
@@ -1159,65 +1130,6 @@ return {{
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn lua_update_functions_set_item_text() {
-        let dir = tempdir().expect("tempdir");
-        let socket_path = dir.path().join("barrs.sock");
-        let config_path = dir.path().join("barrs.lua");
-        fs::write(
-            &config_path,
-            format!(
-                r#"
-calls = 0
-function usage(ctx)
-  calls = calls + 1
-  return {{ text = ctx.item_id .. ":" .. calls, used = 42 }}
-end
-function broken(ctx) error("boom") end
-function noop(ctx) end
-return {{
-  socket_path = "{}",
-  items = {{
-    {{ id = "memory", interval = 3600, plugin = {{ kind = "lua", update = "usage" }},
-       handlers = {{ click = "noop" }} }},
-    {{ id = "broken", interval = 3600, plugin = {{ kind = "lua", update = "broken" }} }},
-  }}
-}}
-"#,
-                socket_path.display()
-            ),
-        )
-        .expect("write config");
-
-        let config = load_config(&config_path).expect("config");
-        let daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
-        let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
-        wait_for_socket(&socket_path).await;
-
-        let memory = wait_for_item_text(&socket_path, "memory", "memory:1").await;
-        assert_eq!(memory["data"]["used"], 42);
-        let broken = wait_for_item_text(&socket_path, "broken", "—").await;
-        assert_eq!(broken["data"]["available"], false);
-
-        send_request(
-            &socket_path,
-            &Request::TriggerItem {
-                payload: crate::ipc::EventPayload::from_trigger(
-                    "memory".into(),
-                    crate::cli::TriggerEvent::Click,
-                ),
-            },
-        )
-        .await
-        .expect("trigger");
-        wait_for_item_text(&socket_path, "memory", "memory:2").await;
-
-        let _ = send_request(&socket_path, &Request::Stop)
-            .await
-            .expect("stop");
-        task.await.expect("join").expect("daemon result");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn a_trigger_behind_a_slow_lua_update_does_not_block_ipc() {
         let dir = tempdir().expect("tempdir");
         let socket_path = dir.path().join("barrs.sock");
@@ -1306,73 +1218,6 @@ return {{
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn daemon_accepts_ping_and_stop() {
-        let dir = tempdir().expect("tempdir");
-        let socket_path = dir.path().join("barrs.sock");
-        let config_path = dir.path().join("barrs.lua");
-        write_config(&config_path, &socket_path);
-
-        let config = load_config(&config_path).expect("config");
-        let daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
-        let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
-
-        for _ in 0..20 {
-            if socket_path.exists() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-
-        let pong = send_request(&socket_path, &Request::Ping)
-            .await
-            .expect("ping");
-        assert!(matches!(pong, Response::Pong));
-
-        let stop = send_request(&socket_path, &Request::Stop)
-            .await
-            .expect("stop");
-        assert!(matches!(stop, Response::Ok { .. }));
-        task.await.expect("join").expect("daemon result");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn daemon_delivers_trigger_item_requests_to_lua_handlers() {
-        let dir = tempdir().expect("tempdir");
-        let socket_path = dir.path().join("barrs.sock");
-        let config_path = dir.path().join("barrs.lua");
-        let marker_path = dir.path().join("trigger.txt");
-        write_trigger_config(&config_path, &socket_path, &marker_path);
-
-        let config = load_config(&config_path).expect("config");
-        let daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
-        let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
-
-        wait_for_socket(&socket_path).await;
-
-        let response = send_request(
-            &socket_path,
-            &Request::TriggerItem {
-                payload: crate::ipc::EventPayload::from_trigger(
-                    "clock".into(),
-                    crate::cli::TriggerEvent::Click,
-                ),
-            },
-        )
-        .await
-        .expect("trigger");
-        assert!(matches!(response, Response::Ok { .. }));
-        assert_eq!(
-            fs::read_to_string(&marker_path).expect("marker"),
-            "clock:click"
-        );
-
-        let _ = send_request(&socket_path, &Request::Stop)
-            .await
-            .expect("stop");
-        task.await.expect("join").expect("daemon result");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn stop_reply_arrives_before_the_daemon_runtime_shuts_down() {
         let dir = tempdir().expect("tempdir");
         let socket_path = dir.path().join("barrs.sock");
@@ -1396,114 +1241,6 @@ return {{
             .expect("stop reply");
         assert!(matches!(response, Response::Ok { .. }));
         daemon_thread.join().expect("join").expect("daemon result");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn daemon_survives_malformed_requests() {
-        let dir = tempdir().expect("tempdir");
-        let socket_path = dir.path().join("barrs.sock");
-        let config_path = dir.path().join("barrs.lua");
-        write_config(&config_path, &socket_path);
-
-        let config = load_config(&config_path).expect("config");
-        let daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
-        let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
-
-        wait_for_socket(&socket_path).await;
-
-        let mut stream = UnixStream::connect(&socket_path).await.expect("connect");
-        stream
-            .write_all(b"not json\n")
-            .await
-            .expect("write request");
-        let mut reader = BufReader::new(stream);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.expect("read response");
-        assert!(matches!(
-            serde_json::from_str::<Response>(line.trim()).expect("response"),
-            Response::Error { .. }
-        ));
-
-        let pong = send_request(&socket_path, &Request::Ping)
-            .await
-            .expect("ping");
-        assert!(matches!(pong, Response::Pong));
-
-        let _ = send_request(&socket_path, &Request::Stop)
-            .await
-            .expect("stop");
-        task.await.expect("join").expect("daemon result");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn daemon_survives_unknown_item_trigger_over_ipc() {
-        let dir = tempdir().expect("tempdir");
-        let socket_path = dir.path().join("barrs.sock");
-        let config_path = dir.path().join("barrs.lua");
-        let marker_path = dir.path().join("trigger.txt");
-        write_trigger_config(&config_path, &socket_path, &marker_path);
-
-        let config = load_config(&config_path).expect("config");
-        let daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
-        let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
-
-        wait_for_socket(&socket_path).await;
-
-        let response = send_request(
-            &socket_path,
-            &Request::TriggerItem {
-                payload: crate::ipc::EventPayload::from_trigger(
-                    "missing".into(),
-                    crate::cli::TriggerEvent::Click,
-                ),
-            },
-        )
-        .await
-        .expect("trigger");
-        let Response::Error { message } = response else {
-            panic!("expected error response");
-        };
-        assert!(message.contains("unknown item missing"));
-
-        let pong = send_request(&socket_path, &Request::Ping)
-            .await
-            .expect("ping");
-        assert!(matches!(pong, Response::Pong));
-
-        let _ = send_request(&socket_path, &Request::Stop)
-            .await
-            .expect("stop");
-        task.await.expect("join").expect("daemon result");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn daemon_survives_reload_with_broken_config() {
-        let dir = tempdir().expect("tempdir");
-        let socket_path = dir.path().join("barrs.sock");
-        let config_path = dir.path().join("barrs.lua");
-        write_config(&config_path, &socket_path);
-
-        let config = load_config(&config_path).expect("config");
-        let daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
-        let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
-
-        wait_for_socket(&socket_path).await;
-        fs::write(&config_path, "this is not lua").expect("write broken config");
-
-        let response = send_request(&socket_path, &Request::Reload)
-            .await
-            .expect("reload");
-        assert!(matches!(response, Response::Error { .. }));
-
-        let pong = send_request(&socket_path, &Request::Ping)
-            .await
-            .expect("ping");
-        assert!(matches!(pong, Response::Pong));
-
-        let _ = send_request(&socket_path, &Request::Stop)
-            .await
-            .expect("stop");
-        task.await.expect("join").expect("daemon result");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1558,41 +1295,6 @@ return {{
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn lua_handler_state_persists_between_events() {
-        let dir = tempdir().expect("tempdir");
-        let socket_path = dir.path().join("barrs.sock");
-        let config_path = dir.path().join("barrs.lua");
-        let marker_path = dir.path().join("counter.txt");
-        write_counter_config(&config_path, &socket_path, &marker_path);
-
-        let config = load_config(&config_path).expect("config");
-        let daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
-        let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
-
-        wait_for_socket(&socket_path).await;
-        for _ in 0..2 {
-            let response = send_request(
-                &socket_path,
-                &Request::TriggerItem {
-                    payload: crate::ipc::EventPayload::from_trigger(
-                        "clock".into(),
-                        crate::cli::TriggerEvent::Click,
-                    ),
-                },
-            )
-            .await
-            .expect("trigger");
-            assert!(matches!(response, Response::Ok { .. }));
-        }
-        assert_eq!(fs::read_to_string(&marker_path).expect("marker"), "2");
-
-        let _ = send_request(&socket_path, &Request::Stop)
-            .await
-            .expect("stop");
-        task.await.expect("join").expect("daemon result");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn lua_handlers_do_not_reread_config_from_disk() {
         let dir = tempdir().expect("tempdir");
         let socket_path = dir.path().join("barrs.sock");
@@ -1618,57 +1320,6 @@ return {{
         .await
         .expect("trigger");
         assert!(matches!(response, Response::Ok { .. }));
-        assert_eq!(fs::read_to_string(&marker_path).expect("marker"), "1");
-
-        let _ = send_request(&socket_path, &Request::Stop)
-            .await
-            .expect("stop");
-        task.await.expect("join").expect("daemon result");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn reload_resets_lua_handler_state() {
-        let dir = tempdir().expect("tempdir");
-        let socket_path = dir.path().join("barrs.sock");
-        let config_path = dir.path().join("barrs.lua");
-        let marker_path = dir.path().join("counter.txt");
-        write_counter_config(&config_path, &socket_path, &marker_path);
-
-        let config = load_config(&config_path).expect("config");
-        let daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
-        let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
-
-        wait_for_socket(&socket_path).await;
-        for _ in 0..2 {
-            let _ = send_request(
-                &socket_path,
-                &Request::TriggerItem {
-                    payload: crate::ipc::EventPayload::from_trigger(
-                        "clock".into(),
-                        crate::cli::TriggerEvent::Click,
-                    ),
-                },
-            )
-            .await
-            .expect("trigger");
-        }
-        assert_eq!(fs::read_to_string(&marker_path).expect("marker"), "2");
-
-        let response = send_request(&socket_path, &Request::Reload)
-            .await
-            .expect("reload");
-        assert!(matches!(response, Response::Ok { .. }));
-        let _ = send_request(
-            &socket_path,
-            &Request::TriggerItem {
-                payload: crate::ipc::EventPayload::from_trigger(
-                    "clock".into(),
-                    crate::cli::TriggerEvent::Click,
-                ),
-            },
-        )
-        .await
-        .expect("trigger");
         assert_eq!(fs::read_to_string(&marker_path).expect("marker"), "1");
 
         let _ = send_request(&socket_path, &Request::Stop)
@@ -1898,35 +1549,6 @@ return {{
         assert!(!state.bar.items().contains_key("new"));
 
         assert_eq!(reconciles.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn daemon_rejects_trigger_item_requests_for_unknown_items() {
-        let dir = tempdir().expect("tempdir");
-        let socket_path = dir.path().join("barrs.sock");
-        let config_path = dir.path().join("barrs.lua");
-        let marker_path = dir.path().join("trigger.txt");
-        write_trigger_config(&config_path, &socket_path, &marker_path);
-
-        let config = load_config(&config_path).expect("config");
-        let mut daemon = Daemon::new(config_path.clone(), config, NoopRenderer).expect("daemon");
-
-        let response = answer(
-            &mut daemon,
-            Request::TriggerItem {
-                payload: crate::ipc::EventPayload::from_trigger(
-                    "missing".into(),
-                    crate::cli::TriggerEvent::HoverEnter,
-                ),
-            },
-        )
-        .await;
-
-        let Response::Error { message } = response else {
-            panic!("unknown item should fail");
-        };
-        assert!(message.contains("unknown item missing"));
-        assert!(!marker_path.exists());
     }
 
     #[test]

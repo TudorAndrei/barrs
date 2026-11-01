@@ -102,26 +102,12 @@ pub enum RiftCommand {
 mod tests {
     use std::ffi::OsStr;
 
-    use super::{Cli, Command, ItemCommand, RiftCommand, TriggerEvent};
+    use super::{Cli, Command, RiftCommand};
     use crate::render::RendererKind;
 
     fn parse(words: &[&str]) -> Cli {
         let argv: Vec<&OsStr> = words.iter().map(OsStr::new).collect();
         Cli::parse_from(&argv).expect("valid command line")
-    }
-
-    #[test]
-    fn parses_item_trigger() {
-        let cli = parse(&["item", "trigger", "cpu", "hover-enter"]);
-        match cli.command {
-            Command::Item(item) => match item.command {
-                ItemCommand::Trigger(args) => {
-                    assert_eq!(args.item_id, "cpu");
-                    assert_eq!(args.event, TriggerEvent::HoverEnter);
-                }
-            },
-            other => panic!("unexpected command: {other:?}"),
-        }
     }
 
     #[test]

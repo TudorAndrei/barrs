@@ -22,6 +22,10 @@ tempfile = "3.13"
 name = "config"
 harness = false
 
+[[test]]
+name = "daemon"
+harness = false
+
 [lints.clippy]
 pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
