@@ -89,7 +89,7 @@ platform paths.
 `src/rift.rs` selects the Rift Mach backend when available, otherwise the Rift
 CLI backend. The daemon receives a Rift backend at construction:
 `src/rift.rs#struct:SelectedRiftBackend` selects again on every call in
-production, and tests pass a fake, so no daemon test reaches Rift. The
+production, and the unit tests pass a fake, so no unit test reaches Rift. The
 snapshot producer owns the backend and the Rift tracker; every fetch, from a
 refresh, an item event, a reload, or an event resync, goes into the same
 tracker. It supplies workspace and layout snapshots and can subscribe to

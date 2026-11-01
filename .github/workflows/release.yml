@@ -17,7 +17,7 @@ permissions:
 jobs:
   build-macos:
     name: build-macos-${{ matrix.target }}
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     strategy:
