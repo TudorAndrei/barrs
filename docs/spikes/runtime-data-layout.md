@@ -126,3 +126,51 @@ machine has no CPU isolation. Peak memory and allocations are not measured.
 RUSTUP_TOOLCHAIN=1.97.1 cargo test --release --locked --lib \
   measure_ -- --ignored --nocapture --test-threads=1
 ```
+
+## Production measurements
+
+Implementation commit: `fec3d5e`. Reference behavior: `e6ab398`.
+Both process runs passed all five benchmark output checks. This report saves
+only the renderer and Lua rows selected for implementation. The other
+experiments still run as checks but make no new performance claim here.
+
+Run 2 medians, in microseconds per operation:
+
+| Items | Operation | Previous | Implemented | Factor |
+| ---: | --- | ---: | ---: | ---: |
+| 6 | Renderer: one update | 2.441 | 2.317 | 1.05x |
+| 6 | Renderer: three updates | 7.433 | 2.937 | 2.53x |
+| 6 | Renderer: all updates | 14.717 | 3.795 | 3.88x |
+| 6 | Lua: state trace only | 1.558 | 0.020 | 78.33x |
+| 64 | Renderer: one update | 28.271 | 26.993 | 1.05x |
+| 64 | Renderer: three updates | 85.542 | 27.733 | 3.08x |
+| 64 | Renderer: all updates | 1807.337 | 50.129 | 36.05x |
+| 64 | Lua: state trace only | 18.389 | 0.189 | 97.46x |
+
+The [interactive comparison](runtime-data-layout-results.html) shows ranges
+and both process runs. The [raw samples](runtime-data-layout-results.json)
+include every recorded round mean for the selected operations and sizes.
+
+At 64 items, run 1 measured 84.23 vs 27.32 microseconds for three updates,
+1819.06 vs 50.94 for all updates, and 19.55 vs 0.189 for the Lua state trace.
+Run 2 retained these gains. At six items, three updates saved about
+4.5 microseconds and all six saved about 10.9 in run 2. The one-item renderer
+case was about two percent slower at a list size of one and lower at the
+other tested sizes. This is within the three-percent comparison limit; no
+material single-update regression was observed across the two process runs.
+
+The production renderer differs from the earlier prototype: it replaces
+retained snapshots in place and keeps displaced snapshots for rollback.
+The production Lua measurement includes the actual state transition methods.
+Use these new results for the shipped implementation. The earlier prototype
+numbers remain a historical record, not a claim about this implementation.
+
+These factors apply only to the named operation. The Lua ratio does not
+measure Lua execution or full dispatch. The renderer ratio does not measure
+AppKit drawing or screen latency. There is no claim about whole-daemon speed,
+energy use, peak memory, or allocator counts.
+
+Final checks passed: 114 unit tests, 23 Cucumber scenarios, both manual
+benchmark runs, formatting, strict Clippy for all targets and features, the
+locked all-target build check, Rust documentation, and criv validation and
+CI enforcement. Six manual timing tests are skipped in the normal suite.
