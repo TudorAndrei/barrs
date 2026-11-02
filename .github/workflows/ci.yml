@@ -18,13 +18,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v5
 
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install
-
-      - name: Install pinned Nextest
+      - name: Install pinned Rust and test tools
         uses: jdx/mise-action@v3
         with:
-          install_args: cargo:cargo-nextest
+          install_args: rust mr-boxington cargo:cargo-nextest
 
       - name: Set up shared build cache
         uses: jdx/mr-boxington-action@v1
