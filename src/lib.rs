@@ -15,3 +15,6 @@ pub mod render;
 pub mod rift;
 pub mod rift_tracker;
 pub mod source;
+
+#[cfg(test)]
+mod measurements;

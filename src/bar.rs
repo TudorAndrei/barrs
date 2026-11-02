@@ -51,11 +51,28 @@ impl<R: Renderer> Bar<R> {
     ///
     /// Returns the renderer error; the shown item does not change.
     pub fn show(&mut self, snapshot: RenderItemSnapshot) -> Result<(), BarrsError> {
-        self.renderer.render_item(&snapshot)?;
-        if let Some(shown) = self.items.get_mut(&snapshot.id) {
-            *shown = snapshot;
-        } else {
-            self.items.insert(snapshot.id.clone(), snapshot);
+        self.show_many([snapshot])
+    }
+
+    /// Shows a group of updates after the renderer accepts the complete group.
+    ///
+    /// # Errors
+    ///
+    /// Returns the renderer error; the shown items do not change.
+    pub fn show_many(
+        &mut self,
+        snapshots: impl AsRef<[RenderItemSnapshot]> + IntoIterator<Item = RenderItemSnapshot>,
+    ) -> Result<(), BarrsError> {
+        if snapshots.as_ref().is_empty() {
+            return Ok(());
+        }
+        self.renderer.render_items(snapshots.as_ref())?;
+        for snapshot in snapshots {
+            if let Some(shown) = self.items.get_mut(&snapshot.id) {
+                *shown = snapshot;
+            } else {
+                self.items.insert(snapshot.id.clone(), snapshot);
+            }
         }
         Ok(())
     }
@@ -93,3 +110,6 @@ impl<R: Renderer> Bar<R> {
         &self.renderer
     }
 }
+
+#[cfg(test)]
+mod measurements;

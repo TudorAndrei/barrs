@@ -94,12 +94,22 @@ pub trait Renderer {
         config: &Config,
         snapshots: &[RenderItemSnapshot],
     ) -> Result<(), BarrsError>;
-    /// Draws a new snapshot of one item of the current config.
+    /// Draws a group of item updates. On error, the logical state is unchanged.
+    /// An empty group does no work.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the renderer cannot draw the group.
+    fn render_items(&mut self, snapshots: &[RenderItemSnapshot]) -> Result<(), BarrsError>;
+
+    /// Draws one item through the same batch path.
     ///
     /// # Errors
     ///
     /// Returns an error when the renderer cannot draw the item.
-    fn render_item(&mut self, snapshot: &RenderItemSnapshot) -> Result<(), BarrsError>;
+    fn render_item(&mut self, snapshot: &RenderItemSnapshot) -> Result<(), BarrsError> {
+        self.render_items(std::slice::from_ref(snapshot))
+    }
     /// Returns the input events collected since the last call.
     ///
     /// # Errors
@@ -132,8 +142,8 @@ impl<T: Renderer + ?Sized> Renderer for Box<T> {
         (**self).reconcile(config, snapshots)
     }
 
-    fn render_item(&mut self, snapshot: &RenderItemSnapshot) -> Result<(), BarrsError> {
-        (**self).render_item(snapshot)
+    fn render_items(&mut self, snapshots: &[RenderItemSnapshot]) -> Result<(), BarrsError> {
+        (**self).render_items(snapshots)
     }
 
     fn drain_events(&mut self) -> Result<Vec<EventPayload>, BarrsError> {
@@ -456,11 +466,44 @@ impl Default for NativeSurfaceState {
 }
 
 impl NativeSurfaceState {
-    fn update_snapshot(&mut self, snapshot: RenderItemSnapshot, bar_height: f64) {
-        self.bar_height = bar_height;
-        self.items.retain(|item| item.snapshot.id != snapshot.id);
-        self.items
-            .push(PositionedItemSnapshot::unplaced(snapshot, bar_height));
+    /// Replaces snapshots in place and retains only displaced data for rollback.
+    fn replace_snapshots(
+        &mut self,
+        snapshots: &[RenderItemSnapshot],
+    ) -> Vec<Option<RenderItemSnapshot>> {
+        snapshots
+            .iter()
+            .map(|snapshot| {
+                if let Some(item) = self
+                    .items
+                    .iter_mut()
+                    .find(|item| item.snapshot.id == snapshot.id)
+                {
+                    Some(std::mem::replace(&mut item.snapshot, snapshot.clone()))
+                } else {
+                    self.items.push(PositionedItemSnapshot::unplaced(
+                        snapshot.clone(),
+                        self.bar_height,
+                    ));
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn restore_snapshots(
+        &mut self,
+        snapshots: &[RenderItemSnapshot],
+        displaced: Vec<Option<RenderItemSnapshot>>,
+    ) {
+        // Reverse order also restores repeated updates to the same ID.
+        for (snapshot, previous) in snapshots.iter().zip(displaced).rev() {
+            self.items.retain(|item| item.snapshot.id != snapshot.id);
+            if let Some(previous) = previous {
+                self.items
+                    .push(PositionedItemSnapshot::unplaced(previous, self.bar_height));
+            }
+        }
         self.arrange();
     }
 
@@ -811,10 +854,10 @@ impl AppKitHost {
         self.prepare_for_target_display()?;
         let next_plan = host_scene_plan(scene);
         let commands = diff_host_scene(self.last_plan.as_ref(), &next_plan);
+        self.apply_commands(&commands)?;
         self.last_scene = Some(scene.clone());
         self.last_plan = Some(next_plan);
         self.runtime.apply(&commands);
-        self.apply_commands(&commands)?;
         self.last_commands = commands;
         Ok(())
     }
@@ -1922,10 +1965,22 @@ impl Default for NativeRenderer {
 }
 
 impl Renderer for NativeRenderer {
-    fn render_item(&mut self, snapshot: &RenderItemSnapshot) -> Result<(), BarrsError> {
-        self.state
-            .update_snapshot(snapshot.clone(), self.state.bar_height.max(1.0));
-        self.publish_scene()
+    fn render_items(&mut self, snapshots: &[RenderItemSnapshot]) -> Result<(), BarrsError> {
+        if snapshots.is_empty() {
+            return Ok(());
+        }
+        let previous_height = self.state.bar_height;
+        let previous_layout = self.state.layout;
+        self.state.bar_height = previous_height.max(1.0);
+        let displaced = self.state.replace_snapshots(snapshots);
+        self.state.arrange();
+        if let Err(error) = self.publish_scene() {
+            self.state.bar_height = previous_height;
+            self.state.layout = previous_layout;
+            self.state.restore_snapshots(snapshots, displaced);
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn reconcile(
@@ -1990,7 +2045,7 @@ impl Renderer for NativeRenderer {
 pub struct NoopRenderer;
 
 impl Renderer for NoopRenderer {
-    fn render_item(&mut self, _snapshot: &RenderItemSnapshot) -> Result<(), BarrsError> {
+    fn render_items(&mut self, _snapshots: &[RenderItemSnapshot]) -> Result<(), BarrsError> {
         Ok(())
     }
 
@@ -2920,6 +2975,78 @@ mod tests {
         assert_close(super::bar_window_height(900.0, 170.0, 28.0), 28.0);
     }
 
+    #[test]
+    fn a_batch_publishes_once_and_a_failed_batch_can_be_retried() {
+        struct BatchHost {
+            fail: Arc<AtomicBool>,
+            scenes: Arc<Mutex<Vec<super::BarScene>>>,
+        }
+        impl NativeHost for BatchHost {
+            fn initialize(&mut self, _config: &Config) -> Result<(), crate::error::BarrsError> {
+                Ok(())
+            }
+            fn layout_geometry(
+                &self,
+                _config: &Config,
+                _height: f64,
+            ) -> Result<super::LayoutGeometry, crate::error::BarrsError> {
+                Ok(super::LayoutGeometry {
+                    bar_width: if self.fail.load(Ordering::SeqCst) {
+                        400.0
+                    } else {
+                        200.0
+                    },
+                    ..super::LayoutGeometry::default()
+                })
+            }
+            fn present(&mut self, scene: &super::BarScene) -> Result<(), crate::error::BarrsError> {
+                if self.fail.load(Ordering::SeqCst) {
+                    return Err(crate::error::BarrsError::Unsupported(
+                        "publication failed".into(),
+                    ));
+                }
+                self.scenes.lock().expect("scenes").push(scene.clone());
+                Ok(())
+            }
+        }
+        let fail = Arc::new(AtomicBool::new(false));
+        let scenes = Arc::new(Mutex::new(Vec::new()));
+        let renderer = NativeRenderer::new(Box::new(BatchHost {
+            fail: Arc::clone(&fail),
+            scenes: Arc::clone(&scenes),
+        }));
+        let mut bar = crate::bar::Bar::new(renderer);
+        bar.reconcile(
+            &Config::default(),
+            vec![
+                test_snapshot("clock", 0, Some("left"), "old"),
+                test_snapshot("tail", 1, Some("right"), "unchanged"),
+            ],
+        )
+        .expect("initial scene");
+        let old_surface = bar.renderer().surface_state().clone();
+        let old_shown = bar.items().clone();
+        let updates = vec![
+            test_snapshot("clock", 0, Some("middle"), "wider intermediate"),
+            test_snapshot("added", 2, Some("right"), "new"),
+            test_snapshot("clock", 0, Some("left"), "final"),
+        ];
+        fail.store(true, Ordering::SeqCst);
+        bar.show_many(updates.clone()).expect_err("failed batch");
+        assert_eq!(bar.renderer().surface_state(), &old_surface);
+        assert_eq!(bar.items(), &old_shown);
+        assert_eq!(scenes.lock().expect("scenes").len(), 1);
+
+        fail.store(false, Ordering::SeqCst);
+        bar.show_many(updates).expect("retry batch");
+        assert_eq!(scenes.lock().expect("scenes").len(), 2);
+        assert_eq!(bar.items()["clock"].content.text(), "final");
+        assert_eq!(bar.items()["added"].content.text(), "new");
+        assert_eq!(bar.items()["tail"].content.text(), "unchanged");
+        bar.show_many(Vec::new()).expect("empty batch");
+        assert_eq!(scenes.lock().expect("scenes").len(), 2);
+    }
+
     struct ChangingLayoutHost {
         calls: AtomicUsize,
         scenes: Arc<Mutex<Vec<super::BarScene>>>,
@@ -3582,3 +3709,6 @@ mod tests {
         )));
     }
 }
+
+#[cfg(test)]
+mod measurements;

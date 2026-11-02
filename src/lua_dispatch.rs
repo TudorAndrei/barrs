@@ -1,8 +1,6 @@
 //! Lua item dispatch: item events and update requests to the Lua executor of
 //! the current config generation, and their results back to the event loop.
 
-use std::collections::HashSet;
-
 use tokio::sync::mpsc;
 
 use crate::config::{Config, ItemConfig};
@@ -25,17 +23,50 @@ use crate::lua_executor::LuaExecutor;
 pub struct LuaDispatch<T> {
     executor: LuaExecutor,
     epoch: u64,
-    /// Lua items whose update function is queued or running.
-    in_flight: HashSet<String>,
-    /// In-flight items that update once more when their call ends.
-    again: HashSet<String>,
+    /// One state per current config item, indexed by config order.
+    updates: Vec<UpdateState>,
     sender: mpsc::UnboundedSender<Message<T>>,
     receiver: mpsc::UnboundedReceiver<Message<T>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpdateState {
+    Idle,
+    Running,
+    Again,
+}
+
+impl UpdateState {
+    /// A scheduled request does not queue a duplicate.
+    fn request(&mut self) -> bool {
+        if *self != Self::Idle {
+            return false;
+        }
+        *self = Self::Running;
+        true
+    }
+
+    /// An event during a call requests exactly one further call.
+    fn request_now(&mut self) -> bool {
+        if self.request() {
+            true
+        } else {
+            *self = Self::Again;
+            false
+        }
+    }
+
+    fn complete(&mut self) -> bool {
+        let repeat = *self == Self::Again;
+        *self = if repeat { Self::Running } else { Self::Idle };
+        repeat
+    }
 }
 
 enum Message<T> {
     Handled {
         epoch: u64,
+        order: usize,
         tag: T,
         item_id: String,
         event: EventKind,
@@ -45,6 +76,7 @@ enum Message<T> {
     },
     Updated {
         epoch: u64,
+        order: usize,
         item_id: String,
         function: String,
         outcome: Result<ItemContent, BarrsError>,
@@ -76,13 +108,12 @@ pub enum Dispatched<T> {
 
 impl<T: Send + 'static> LuaDispatch<T> {
     #[must_use]
-    pub fn new(executor: LuaExecutor) -> Self {
+    pub fn new(executor: LuaExecutor, config: &Config) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         Self {
             executor,
             epoch: 0,
-            in_flight: HashSet::new(),
-            again: HashSet::new(),
+            updates: vec![UpdateState::Idle; config.items.len()],
             sender,
             receiver,
         }
@@ -99,11 +130,10 @@ impl<T: Send + 'static> LuaDispatch<T> {
     ///
     /// Calls already queued on the old executor still run. Their update
     /// results are discarded; their handler results still come back.
-    pub fn replace(&mut self, executor: LuaExecutor) {
+    pub fn replace(&mut self, executor: LuaExecutor, config: &Config) {
         self.executor = executor;
         self.epoch = self.epoch.wrapping_add(1);
-        self.in_flight.clear();
-        self.again.clear();
+        self.updates = vec![UpdateState::Idle; config.items.len()];
     }
 
     /// Queues the handler of `item` for the event in `payload`.
@@ -111,7 +141,9 @@ impl<T: Send + 'static> LuaDispatch<T> {
     /// The handler result comes back with `tag` from [`Self::next`]. A
     /// click, right click, or scroll on an item with an update function makes
     /// its update due as soon as the handler succeeds.
-    pub fn deliver(&mut self, item: &ItemConfig, payload: &EventPayload, tag: T) {
+    /// `order` is the index of `item` in the current config. The daemon
+    /// resolves this index before it queues the event.
+    pub fn deliver(&mut self, order: usize, item: &ItemConfig, payload: &EventPayload, tag: T) {
         let epoch = self.epoch;
         let item_id = item.id.clone();
         let event = payload.event;
@@ -120,6 +152,7 @@ impl<T: Send + 'static> LuaDispatch<T> {
         let done = move |result| {
             let _ = sender.send(Message::Handled {
                 epoch,
+                order,
                 tag,
                 item_id,
                 event,
@@ -137,20 +170,22 @@ impl<T: Send + 'static> LuaDispatch<T> {
         }
     }
 
-    /// Queues the update functions of the Lua items among `item_ids` that are
-    /// not already in flight. Other items are skipped.
-    pub fn request_updates(&mut self, config: &Config, item_ids: &[String]) {
-        for item_id in item_ids {
-            if self.in_flight.contains(item_id) {
-                continue;
-            }
-            let Some(function) = config
-                .item(item_id)
-                .and_then(|item| item.source.lua_update())
-            else {
+    /// Queues Lua updates by index into the current configuration.
+    /// Already running, non-Lua, and out-of-range items are skipped.
+    pub fn request_updates(&mut self, config: &Config, item_orders: &[usize]) {
+        for &order in item_orders {
+            let Some(item) = config.items.get(order) else {
                 continue;
             };
-            self.submit_update(item_id.clone(), function);
+            let Some(function) = item.source.lua_update() else {
+                continue;
+            };
+            let Some(state) = self.updates.get_mut(order) else {
+                continue;
+            };
+            if state.request() {
+                self.submit_update(order, &item.id, function);
+            }
         }
     }
 
@@ -167,6 +202,7 @@ impl<T: Send + 'static> LuaDispatch<T> {
             match message {
                 Message::Handled {
                     epoch,
+                    order,
                     tag,
                     item_id,
                     event,
@@ -176,7 +212,7 @@ impl<T: Send + 'static> LuaDispatch<T> {
                     let follow_up = epoch == self.epoch && result.is_ok() && !event.is_hover();
                     let refresh = follow_up && update.is_none();
                     if follow_up && let Some(function) = update {
-                        self.update_now(item_id.clone(), &function);
+                        self.update_now(order, &item_id, &function);
                     }
                     return Dispatched::Handled {
                         tag,
@@ -187,6 +223,7 @@ impl<T: Send + 'static> LuaDispatch<T> {
                 }
                 Message::Updated {
                     epoch,
+                    order,
                     item_id,
                     function,
                     outcome,
@@ -194,9 +231,11 @@ impl<T: Send + 'static> LuaDispatch<T> {
                     if epoch != self.epoch {
                         continue;
                     }
-                    self.in_flight.remove(&item_id);
-                    if self.again.remove(&item_id) {
-                        self.submit_update(item_id.clone(), &function);
+                    let Some(state) = self.updates.get_mut(order) else {
+                        continue;
+                    };
+                    if state.complete() {
+                        self.submit_update(order, &item_id, &function);
                     }
                     let content = outcome.unwrap_or_else(|error| {
                         eprintln!("barrs: lua update for {item_id} failed: {error}");
@@ -209,29 +248,30 @@ impl<T: Send + 'static> LuaDispatch<T> {
     }
 
     /// Makes an update due now; an update in flight runs once more after it.
-    fn update_now(&mut self, item_id: String, function: &str) {
-        if self.in_flight.contains(&item_id) {
-            self.again.insert(item_id);
-        } else {
-            self.submit_update(item_id, function);
+    fn update_now(&mut self, order: usize, item_id: &str, function: &str) {
+        let Some(state) = self.updates.get_mut(order) else {
+            return;
+        };
+        if state.request_now() {
+            self.submit_update(order, item_id, function);
         }
     }
 
-    fn submit_update(&mut self, item_id: String, function: &str) {
+    fn submit_update(&self, order: usize, item_id: &str, function: &str) {
         let epoch = self.epoch;
         let sender = self.sender.clone();
-        let id = item_id.clone();
+        let id = item_id.to_owned();
         let name = function.to_owned();
         self.executor
-            .request_update(&item_id, function, move |outcome| {
+            .request_update(item_id, function, move |outcome| {
                 let _ = sender.send(Message::Updated {
                     epoch,
+                    order,
                     item_id: id,
                     function: name,
                     outcome,
                 });
             });
-        self.in_flight.insert(item_id);
     }
 }
 
@@ -251,7 +291,7 @@ mod tests {
 
     /// Starts an executor for one Lua item `status` whose update function
     /// counts its calls, prefixed by `generation`.
-    fn start(path: &Path, generation: &str) -> (LuaExecutor, Config) {
+    fn start(path: &Path, generation: &str, prefix: &str) -> (LuaExecutor, Config) {
         fs::write(
             path,
             format!(
@@ -262,7 +302,7 @@ function status(ctx)
   return "{generation}" .. calls
 end
 function noop(ctx) end
-return {{ items = {{ {{
+return {{ items = {{ {prefix} {{
   id = "status",
   plugin = {{ kind = "lua", update = "status" }},
   handlers = {{ click = "noop", hover_update = "noop" }},
@@ -276,7 +316,7 @@ return {{ items = {{ {{
 
     fn deliver(dispatch: &mut LuaDispatch<&'static str>, config: &Config, event: TriggerEvent) {
         let payload = EventPayload::from_trigger("status".into(), event);
-        dispatch.deliver(&config.items[0], &payload, "event");
+        dispatch.deliver(0, &config.items[0], &payload, "event");
     }
 
     async fn next(dispatch: &mut LuaDispatch<&'static str>) -> Dispatched<&'static str> {
@@ -316,9 +356,9 @@ return {{ items = {{ {{
     #[tokio::test(flavor = "current_thread")]
     async fn an_update_in_flight_is_not_requested_again() {
         let dir = tempdir().expect("tempdir");
-        let (executor, config) = start(&dir.path().join("barrs.lua"), "v");
-        let mut dispatch = LuaDispatch::new(executor);
-        let due = ["status".to_owned()];
+        let (executor, config) = start(&dir.path().join("barrs.lua"), "v", "");
+        let mut dispatch = LuaDispatch::new(executor, &config);
+        let due = [0];
 
         dispatch.request_updates(&config, &due);
         dispatch.request_updates(&config, &due);
@@ -334,8 +374,8 @@ return {{ items = {{ {{
     #[tokio::test(flavor = "current_thread")]
     async fn a_click_makes_the_update_due_after_its_handler() {
         let dir = tempdir().expect("tempdir");
-        let (executor, config) = start(&dir.path().join("barrs.lua"), "v");
-        let mut dispatch = LuaDispatch::new(executor);
+        let (executor, config) = start(&dir.path().join("barrs.lua"), "v", "");
+        let mut dispatch = LuaDispatch::new(executor, &config);
 
         deliver(&mut dispatch, &config, TriggerEvent::Click);
         next_handled(&mut dispatch).await;
@@ -345,12 +385,14 @@ return {{ items = {{ {{
     #[tokio::test(flavor = "current_thread")]
     async fn a_click_during_an_update_runs_it_once_more() {
         let dir = tempdir().expect("tempdir");
-        let (executor, config) = start(&dir.path().join("barrs.lua"), "v");
-        let mut dispatch = LuaDispatch::new(executor);
+        let (executor, config) = start(&dir.path().join("barrs.lua"), "v", "");
+        let mut dispatch = LuaDispatch::new(executor, &config);
 
         deliver(&mut dispatch, &config, TriggerEvent::Click);
-        dispatch.request_updates(&config, &["status".to_owned()]);
-        // The click handler ends while the scheduled update is in flight.
+        deliver(&mut dispatch, &config, TriggerEvent::Click);
+        dispatch.request_updates(&config, &[0]);
+        // Both handlers finish before the scheduled update is applied.
+        next_handled(&mut dispatch).await;
         next_handled(&mut dispatch).await;
         assert_eq!(next_text(&mut dispatch).await, "v1");
         deliver(&mut dispatch, &config, TriggerEvent::HoverUpdate);
@@ -360,33 +402,39 @@ return {{ items = {{ {{
 
     #[tokio::test(flavor = "current_thread")]
     async fn updates_of_an_older_generation_are_discarded() {
-        let dir = tempdir().expect("tempdir");
-        let (old, config) = start(&dir.path().join("old.lua"), "old");
-        let (new, _) = start(&dir.path().join("new.lua"), "new");
-        let mut dispatch = LuaDispatch::new(old);
-        let epoch = dispatch.epoch();
+        for prefix in ["", r#"{ id = "label", label = "fixed" },"#] {
+            let dir = tempdir().expect("tempdir");
+            let (old, config) = start(&dir.path().join("old.lua"), "old", "");
+            let (new, new_config) = start(&dir.path().join("new.lua"), "new", prefix);
+            let mut dispatch = LuaDispatch::new(old, &config);
+            let epoch = dispatch.epoch();
 
-        dispatch.request_updates(&config, &["status".to_owned()]);
-        // The old update result is queued before this handler result.
-        deliver(&mut dispatch, &config, TriggerEvent::Click);
-        dispatch.replace(new);
-        assert_ne!(dispatch.epoch(), epoch);
-        dispatch.request_updates(&config, &["status".to_owned()]);
+            dispatch.request_updates(&config, &[0]);
+            // The old update result is queued before this handler result.
+            deliver(&mut dispatch, &config, TriggerEvent::Click);
+            dispatch.replace(new, &new_config);
+            assert_ne!(dispatch.epoch(), epoch);
+            // Also cover a shifted Lua slot, a non-Lua slot, and invalid indices.
+            dispatch.request_updates(&new_config, &[0, 1, usize::MAX]);
 
-        let mut texts = Vec::new();
-        let mut handled = 0;
-        for _ in 0..2 {
-            match next(&mut dispatch).await {
-                Dispatched::Updated { content, .. } => texts.push(content.text().into_owned()),
-                Dispatched::Handled {
-                    result, refresh, ..
-                } => {
-                    result.expect("old handler still answers");
-                    assert!(!refresh);
-                    handled += 1;
+            let mut texts = Vec::new();
+            let mut handled = 0;
+            for _ in 0..2 {
+                match next(&mut dispatch).await {
+                    Dispatched::Updated { content, .. } => texts.push(content.text().into_owned()),
+                    Dispatched::Handled {
+                        result, refresh, ..
+                    } => {
+                        result.expect("old handler still answers");
+                        assert!(!refresh);
+                        handled += 1;
+                    }
                 }
             }
+            assert_eq!((texts, handled), (vec!["new1".to_owned()], 1));
         }
-        assert_eq!((texts, handled), (vec!["new1".to_owned()], 1));
     }
 }
+
+#[cfg(test)]
+mod measurements;
