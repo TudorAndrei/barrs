@@ -51,13 +51,23 @@ handler, or an item's update, without waiting, and returns each finished call
 to the event loop as a message. The handler slot for an event is the event
 kind itself (`src/ipc.rs#enum:EventKind`); config validation, the dispatch, and
 the renderer's interactive flags all read it through
-`src/config.rs#fn:get`. Dispatch keeps at most one update per item in flight,
-runs the update after a click, right click, or scroll handler, and discards
-update results of an older config epoch. An item trigger request answers when
+`src/config.rs#fn:get`. Dispatch keeps one indexed state per configuration
+item: idle, running, or
+running with one repeat request. Scheduled Lua work and completion messages
+carry the configuration index. The dispatch checks the epoch before it reads
+or changes that state. It runs the update after a click, right click, or scroll
+handler and discards update results of an older config epoch. An item trigger
+request answers when
 its handler ends, or when the new snapshot of a non-Lua item is shown. The
 renderer interface, `src/render.rs#trait:Renderer`, has the operations that
 the daemon uses: a transactional reconcile of the complete next snapshot set
-(ADR-0010), one item update, and renderer events. The native renderer is
+(ADR-0010), a group of item updates, and renderer events. Scheduled and Rift
+updates render as one group: the native renderer arranges and publishes once.
+One item uses the same path. A failed group restores the logical renderer
+state; the bar records the shown snapshots only after the group succeeds.
+The renderer retains only displaced snapshots for rollback. Reload continues
+to reconcile the complete next state. See [[runtime-data-layout]] for the
+implementation checks and measurements. The native renderer is
 macOS/AppKit-specific and is intentionally current-thread only; it draws
 through a native host, the `AppKit` host or a mock host for tests. The noop
 renderer supports tests and non-visual operation.
@@ -65,7 +75,8 @@ renderer supports tests and non-visual operation.
 The refresh scheduler stores only scheduled items in a flat array. Each row
 contains a deadline and an index into the current configuration. The 250 ms
 scan reads these rows in order and reads an item's configuration only when
-its deadline is due. It sends due IDs directly to the Lua or source batch.
+its deadline is due. It sends Lua indices and source IDs directly to their
+respective batches.
 Fixed labels without an interval have no row. Reload replaces the array with
 the configuration; results from an older epoch cannot advance new deadlines.
 The data layout and its scan benchmark are described in

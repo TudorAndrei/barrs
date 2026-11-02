@@ -1,14 +1,10 @@
-//! Storage-only trace copied from dispatch transitions; no Lua calls are timed.
+//! Retained set operations versus production state transitions.
+//! No Lua calls are timed.
 use crate::measurements::{compare, config};
 use std::collections::HashSet;
 use std::hint::black_box;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum UpdateState {
-    Idle,
-    Running,
-    Again,
-}
+use super::UpdateState;
 
 fn set_cycle(ids: &[String], running: &mut HashSet<String>, again: &mut HashSet<String>) -> usize {
     for id in ids {
@@ -40,32 +36,22 @@ fn set_cycle(ids: &[String], running: &mut HashSet<String>, again: &mut HashSet<
 }
 
 fn array_cycle(states: &mut [UpdateState]) -> usize {
-    for slot in &mut *states {
-        let state = black_box(slot);
-        if *state == UpdateState::Idle {
-            *state = UpdateState::Running;
-        }
+    for state in &mut *states {
+        black_box(black_box(state).request());
     }
     for _ in 0..2 {
-        for slot in &mut *states {
-            let state = black_box(slot);
-            if *state != UpdateState::Idle {
-                *state = UpdateState::Again;
-            }
+        for state in &mut *states {
+            black_box(black_box(state).request_now());
         }
     }
     let mut repeats = 0usize;
-    for slot in &mut *states {
-        let state = black_box(slot);
-        if *state == UpdateState::Again {
+    for state in &mut *states {
+        if black_box(state).complete() {
             repeats = repeats.wrapping_add(1);
-            *state = UpdateState::Running;
-        } else {
-            *state = UpdateState::Idle;
         }
     }
-    for slot in states {
-        *black_box(slot) = UpdateState::Idle;
+    for state in states {
+        black_box(black_box(state).complete());
     }
     repeats
 }

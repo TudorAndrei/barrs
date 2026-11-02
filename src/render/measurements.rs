@@ -1,4 +1,5 @@
-//! Prototype comparisons. No native windows are created.
+//! Compare the retained old per-item path with production batching.
+//! No native windows are created.
 use super::*;
 use crate::measurements::{compare, config};
 use std::hint::black_box;
@@ -14,21 +15,18 @@ fn snapshots(config: &Config, text: &str) -> Vec<RenderItemSnapshot> {
         .collect()
 }
 
-fn batch_update(renderer: &mut NativeRenderer, updates: &[RenderItemSnapshot]) {
-    // Same item replacement as update_snapshot, with arrange/publish moved
-    // after the complete batch. No indexed replacement is mixed into this test.
+// Retain the old successful update path as the behavior and timing reference.
+fn old_render_item(renderer: &mut NativeRenderer, update: &RenderItemSnapshot) {
     let height = renderer.state.bar_height.max(1.0);
     renderer.state.bar_height = height;
-    for update in updates {
-        renderer
-            .state
-            .items
-            .retain(|item| item.snapshot.id != update.id);
-        renderer
-            .state
-            .items
-            .push(PositionedItemSnapshot::unplaced(update.clone(), height));
-    }
+    renderer
+        .state
+        .items
+        .retain(|item| item.snapshot.id != update.id);
+    renderer
+        .state
+        .items
+        .push(PositionedItemSnapshot::unplaced(update.clone(), height));
     renderer.state.arrange();
     renderer.publish_scene().expect("mock publish");
 }
@@ -52,9 +50,11 @@ fn measure_renderer_batch() {
                 .reconcile(&config, &initial)
                 .expect("initial scene");
             for snapshot in &updates[0][..update_count] {
-                current.render_item(snapshot).expect("current render");
+                old_render_item(&mut current, snapshot);
             }
-            batch_update(&mut candidate, &updates[0][..update_count]);
+            candidate
+                .render_items(&updates[0][..update_count])
+                .expect("batch");
             assert_eq!(current.state, candidate.state);
             assert_eq!(
                 host_scene_plan(&current.state.scene()),
@@ -70,16 +70,15 @@ fn measure_renderer_batch() {
                 || {
                     old_turn ^= 1;
                     for snapshot in black_box(&updates[old_turn][..update_count]) {
-                        current.render_item(snapshot).expect("render");
+                        old_render_item(&mut current, snapshot);
                     }
                     black_box(&current.state);
                 },
                 || {
                     new_turn ^= 1;
-                    batch_update(
-                        &mut candidate,
-                        black_box(&updates[new_turn][..update_count]),
-                    );
+                    candidate
+                        .render_items(black_box(&updates[new_turn][..update_count]))
+                        .expect("batch");
                     black_box(&candidate.state);
                 },
             );

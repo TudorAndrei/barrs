@@ -142,8 +142,8 @@ impl<R: Renderer> Daemon<R> {
         producer.watch(&config);
         let state = DaemonState {
             refresh_deadlines: build_refresh_deadlines(&config, Instant::now(), backend),
+            lua: LuaDispatch::new(lua, &config),
             config,
-            lua: LuaDispatch::new(lua),
             backend,
             bar: Bar::new(renderer),
         };
@@ -330,7 +330,7 @@ impl<R: Renderer> Daemon<R> {
         let state = &mut self.state;
         state.backend = backend;
         state.config = config;
-        state.lua.replace(lua);
+        state.lua.replace(lua, &state.config);
         state.refresh_deadlines =
             build_refresh_deadlines(&state.config, Instant::now(), state.backend);
         self.producer.watch(&state.config);
@@ -445,13 +445,15 @@ impl<R: Renderer> Daemon<R> {
                 }
                 let state = &mut self.state;
                 let mut item_ids = Vec::with_capacity(items.len());
+                let mut snapshots = Vec::with_capacity(items.len());
                 for (item_id, snapshot) in items {
                     match snapshot {
-                        Ok(snapshot) => state.bar.show(snapshot)?,
+                        Ok(snapshot) => snapshots.push(snapshot),
                         Err(error) => eprintln!("barrs: snapshot for {item_id} failed: {error}"),
                     }
                     item_ids.push(item_id);
                 }
+                state.bar.show_many(snapshots)?;
                 let now = Instant::now();
                 advance_refresh_deadlines(
                     &mut state.refresh_deadlines,
@@ -501,9 +503,11 @@ impl<R: Renderer> Daemon<R> {
         rift: RiftUse,
     ) -> Result<(), BarrsError> {
         let state = &mut self.state;
-        for (_, snapshot) in items {
-            state.bar.show(snapshot?)?;
-        }
+        let snapshots = items
+            .into_iter()
+            .map(|(_, snapshot)| snapshot)
+            .collect::<Result<Vec<_>, _>>()?;
+        state.bar.show_many(snapshots)?;
         self.producer.record(rift, Instant::now());
         Ok(())
     }
@@ -517,9 +521,8 @@ impl<R: Renderer> Daemon<R> {
 
     fn process_rift_events(&mut self, now: Instant) -> Result<(), BarrsError> {
         let state = &mut self.state;
-        for snapshot in self.producer.poll_rift(&state.config, now)? {
-            state.bar.show(snapshot)?;
-        }
+        let snapshots = self.producer.poll_rift(&state.config, now)?;
+        state.bar.show_many(snapshots)?;
         Ok(())
     }
 
@@ -530,7 +533,7 @@ impl<R: Renderer> Daemon<R> {
     /// [`Self::apply_dispatched`], which answers `reply`.
     fn deliver_event(&mut self, payload: &EventPayload, reply: EventReply) {
         let state = &mut self.state;
-        let Some(item) = state.config.item(&payload.item_id) else {
+        let Some((order, item)) = state.config.item_with_order(&payload.item_id) else {
             let error = BarrsError::InvalidConfig(format!("unknown item {}", payload.item_id));
             answer_event(reply, Err(error));
             return;
@@ -539,7 +542,7 @@ impl<R: Renderer> Daemon<R> {
             answer_event(reply, Err(error));
             return;
         }
-        state.lua.deliver(item, payload, reply);
+        state.lua.deliver(order, item, payload, reply);
     }
 }
 
@@ -664,7 +667,7 @@ fn due_item_ids(
     deadlines: &[RefreshDeadline],
     config: &Config,
     now: Instant,
-) -> (Vec<String>, Vec<String>) {
+) -> (Vec<usize>, Vec<String>) {
     let mut lua_items = Vec::new();
     let mut source_items = Vec::new();
     for deadline in deadlines {
@@ -675,7 +678,7 @@ fn due_item_ids(
             continue;
         };
         if item.source.lua_update().is_some() {
-            lua_items.push(item.id.clone());
+            lua_items.push(deadline.order);
         } else {
             source_items.push(item.id.clone());
         }
@@ -781,9 +784,9 @@ mod tests {
             Ok(())
         }
 
-        fn render_item(
+        fn render_items(
             &mut self,
-            _snapshot: &crate::render::RenderItemSnapshot,
+            _snapshots: &[crate::render::RenderItemSnapshot],
         ) -> Result<(), crate::error::BarrsError> {
             Ok(())
         }
@@ -799,11 +802,11 @@ mod tests {
             Ok(())
         }
 
-        fn render_item(
+        fn render_items(
             &mut self,
-            _snapshot: &crate::render::RenderItemSnapshot,
+            snapshots: &[crate::render::RenderItemSnapshot],
         ) -> Result<(), crate::error::BarrsError> {
-            self.renders.fetch_add(1, Ordering::SeqCst);
+            self.renders.fetch_add(snapshots.len(), Ordering::SeqCst);
             Ok(())
         }
     }
@@ -1701,7 +1704,7 @@ return {{
         deadlines[0].at = now - std::time::Duration::from_millis(1);
         deadlines[1].at = now;
         let (lua, due) = super::due_item_ids(&deadlines, &config, now);
-        assert_eq!(lua, vec!["lua"]);
+        assert_eq!(lua, vec![3]);
         assert_eq!(due, vec!["due", "failed"]);
         assert!(super::can_start_refresh(false, &due));
         assert!(!super::can_start_refresh(true, &due));

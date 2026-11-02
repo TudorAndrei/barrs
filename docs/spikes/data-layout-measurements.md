@@ -8,6 +8,10 @@ tags:
 
 # Data-layout measurements
 
+This report records the prototypes measured before production adoption.
+The renderer and Lua state changes are now implemented; see
+[[runtime-data-layout]] for their production-path measurements.
+
 ## Contract
 
 This experiment measures the five candidates found after the scheduler change

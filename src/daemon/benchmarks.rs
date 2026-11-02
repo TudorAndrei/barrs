@@ -32,7 +32,7 @@ fn map_due_items(
     })
 }
 
-fn measure(mut scan: impl FnMut() -> (Vec<String>, Vec<String>), iterations: u32) -> f64 {
+fn measure<T>(mut scan: impl FnMut() -> T, iterations: u32) -> f64 {
     let start = std::time::Instant::now();
     for _ in 0..iterations {
         black_box(scan());
@@ -94,9 +94,14 @@ fn scheduler_scan_cost() {
             expected.0.sort();
             expected.1.sort();
             let mut actual = due_item_ids(&array, &config, now);
-            actual.0.sort();
+            let mut actual_ids: Vec<_> = actual
+                .0
+                .iter()
+                .map(|&order| config.items[order].id.clone())
+                .collect();
+            actual_ids.sort();
             actual.1.sort();
-            assert_eq!(actual, expected, "{count} {workload}");
+            assert_eq!((actual_ids, actual.1), expected, "{count} {workload}");
 
             let iterations = if count > 64 { 1_000 } else { 20_000 };
             let mut old_samples = Vec::new();
