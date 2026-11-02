@@ -62,6 +62,15 @@ macOS/AppKit-specific and is intentionally current-thread only; it draws
 through a native host, the `AppKit` host or a mock host for tests. The noop
 renderer supports tests and non-visual operation.
 
+The refresh scheduler stores only scheduled items in a flat array. Each row
+contains a deadline and an index into the current configuration. The 250 ms
+scan reads these rows in order and reads an item's configuration only when
+its deadline is due. It sends due IDs directly to the Lua or source batch.
+Fixed labels without an interval have no row. Reload replaces the array with
+the configuration; results from an older epoch cannot advance new deadlines.
+The data layout and its scan benchmark are described in
+[[scheduler-data-layout]].
+
 The daemon directly owns its state. Its event loop processes stateful requests
 and results in order. Connection tasks parse requests, the blocking snapshot
 tasks read owned inputs, and `src/lua_executor.rs` owns Lua on a separate

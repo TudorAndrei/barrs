@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{ErrorKind, Write};
@@ -112,7 +111,16 @@ struct DaemonState<R: Renderer> {
     backend: RiftBackendKind,
     /// The renderer and the items that it shows; `dump-state` reads them.
     bar: Bar<R>,
-    refresh_deadlines: HashMap<String, Instant>,
+    /// Scheduled items in config order. Replaced with the config on reload,
+    /// so indices never cross epochs.
+    refresh_deadlines: Vec<RefreshDeadline>,
+}
+
+/// A scheduled item's deadline and index into the current config.
+/// Unscheduled items have no row. Rows stay sorted by `order`.
+struct RefreshDeadline {
+    order: usize,
+    at: Instant,
 }
 
 impl<R: Renderer> Daemon<R> {
@@ -352,15 +360,8 @@ impl<R: Renderer> Daemon<R> {
 
     fn refresh_due_items(&mut self) {
         let state = &mut self.state;
-        let (lua_items, due_items): (Vec<String>, Vec<String>) =
-            due_item_ids(&state.refresh_deadlines, Instant::now())
-                .into_iter()
-                .partition(|item_id| {
-                    state
-                        .config
-                        .item(item_id)
-                        .is_some_and(|item| item.source.lua_update().is_some())
-                });
+        let (lua_items, due_items) =
+            due_item_ids(&state.refresh_deadlines, &state.config, Instant::now());
         // A due item that is still in flight keeps its deadline, so it updates
         // once more after the running call ends and its interval passes.
         state.lua.request_updates(&state.config, &lua_items);
@@ -640,28 +641,46 @@ fn build_refresh_deadlines(
     config: &Config,
     now: Instant,
     backend: RiftBackendKind,
-) -> HashMap<String, Instant> {
+) -> Vec<RefreshDeadline> {
     config
         .items
         .iter()
-        .filter_map(|item| {
-            if item.source.lua_update().is_some() {
+        .enumerate()
+        .filter_map(|(order, item)| {
+            let at = if item.source.lua_update().is_some() {
                 // Lua items show a placeholder until their first update, so run it at once.
-                return Some((item.id.clone(), now));
-            }
-            item_refresh_interval(item, backend)
-                .and_then(|refresh_interval| now.checked_add(refresh_interval))
-                .map(|deadline| (item.id.clone(), deadline))
+                now
+            } else {
+                now.checked_add(item_refresh_interval(item, backend)?)?
+            };
+            Some(RefreshDeadline { order, at })
         })
         .collect()
 }
 
-fn due_item_ids(deadlines: &HashMap<String, Instant>, now: Instant) -> Vec<String> {
-    deadlines
-        .iter()
-        .filter(|(_, deadline)| **deadline <= now)
-        .map(|(item_id, _)| item_id.clone())
-        .collect()
+/// Scans only deadlines until an item is due, then reads its config once.
+/// Both lists retain config order. No item IDs are copied on an idle tick.
+fn due_item_ids(
+    deadlines: &[RefreshDeadline],
+    config: &Config,
+    now: Instant,
+) -> (Vec<String>, Vec<String>) {
+    let mut lua_items = Vec::new();
+    let mut source_items = Vec::new();
+    for deadline in deadlines {
+        if deadline.at > now {
+            continue;
+        }
+        let Some(item) = config.items.get(deadline.order) else {
+            continue;
+        };
+        if item.source.lua_update().is_some() {
+            lua_items.push(item.id.clone());
+        } else {
+            source_items.push(item.id.clone());
+        }
+    }
+    (lua_items, source_items)
 }
 
 const fn can_start_refresh(refresh_is_pending: bool, due_items: &[String]) -> bool {
@@ -673,18 +692,20 @@ const fn refresh_epoch_matches(current_epoch: u64, pending_epoch: u64) -> bool {
 }
 
 fn advance_refresh_deadlines(
-    deadlines: &mut HashMap<String, Instant>,
+    deadlines: &mut [RefreshDeadline],
     config: &Config,
     backend: RiftBackendKind,
     item_ids: &[String],
     now: Instant,
 ) {
     for item_id in item_ids {
-        if let Some(item) = config.item(item_id)
+        if let Some((order, item)) = config.item_with_order(item_id)
+            && let Ok(index) = deadlines.binary_search_by_key(&order, |deadline| deadline.order)
+            && let Some(slot) = deadlines.get_mut(index)
             && let Some(refresh_interval) = item_refresh_interval(item, backend)
             && let Some(deadline) = now.checked_add(refresh_interval)
         {
-            deadlines.insert(item_id.clone(), deadline);
+            slot.at = deadline;
         }
     }
 }
@@ -1256,10 +1277,7 @@ return {{
             renders: Arc::clone(&renders),
         };
         let mut daemon = Daemon::new(config_path.clone(), config, renderer).expect("daemon");
-        daemon
-            .state
-            .refresh_deadlines
-            .insert("clock".into(), tokio::time::Instant::now());
+        daemon.state.refresh_deadlines[0].at = tokio::time::Instant::now();
         let task: JoinHandle<Result<(), crate::error::BarrsError>> = tokio::spawn(daemon.run());
 
         wait_for_socket(&socket_path).await;
@@ -1656,13 +1674,35 @@ return {{
     #[test]
     fn scheduler_transitions_are_deterministic() {
         let now = tokio::time::Instant::now();
-        let mut deadlines = std::collections::HashMap::from([
-            ("due".into(), now - std::time::Duration::from_millis(1)),
-            ("later".into(), now + std::time::Duration::from_secs(1)),
-        ]);
-        let mut due = super::due_item_ids(&deadlines, now);
-        due.sort();
-        assert_eq!(due, vec!["due"]);
+        let config = Config {
+            socket_path: None,
+            bar: crate::config::BarConfig::default(),
+            items: vec![
+                scheduled_item("due", ItemSource::System(SystemPlugin::Time)),
+                scheduled_item("failed", ItemSource::System(SystemPlugin::Time)),
+                scheduled_item("later", ItemSource::System(SystemPlugin::Time)),
+                scheduled_item(
+                    "lua",
+                    ItemSource::Lua {
+                        update: "update".into(),
+                    },
+                ),
+                scheduled_item(
+                    "label",
+                    ItemSource::Label {
+                        text: "fixed".into(),
+                        icon: None,
+                    },
+                ),
+            ],
+        };
+        let backend = crate::rift::RiftBackendKind::Mach;
+        let mut deadlines = super::build_refresh_deadlines(&config, now, backend);
+        deadlines[0].at = now - std::time::Duration::from_millis(1);
+        deadlines[1].at = now;
+        let (lua, due) = super::due_item_ids(&deadlines, &config, now);
+        assert_eq!(lua, vec!["lua"]);
+        assert_eq!(due, vec!["due", "failed"]);
         assert!(super::can_start_refresh(false, &due));
         assert!(!super::can_start_refresh(true, &due));
         assert!(!super::can_start_refresh(false, &[]));
@@ -1670,14 +1710,6 @@ return {{
         assert!(super::refresh_epoch_matches(4, 4));
         assert!(!super::refresh_epoch_matches(4, 3));
 
-        let config = Config {
-            socket_path: None,
-            bar: crate::config::BarConfig::default(),
-            items: vec![
-                scheduled_item("due", ItemSource::System(SystemPlugin::Time)),
-                scheduled_item("failed", ItemSource::System(SystemPlugin::Time)),
-            ],
-        };
         // A partial snapshot failure still advances every attempted item's deadline,
         // avoiding a tight retry loop. `states` would contain only `due` here.
         super::advance_refresh_deadlines(
@@ -1687,8 +1719,20 @@ return {{
             &["due".into(), "failed".into()],
             now,
         );
-        assert_eq!(deadlines["due"], now + std::time::Duration::from_secs(1));
-        assert_eq!(deadlines["failed"], now + std::time::Duration::from_secs(1));
+        assert_eq!(deadlines[0].at, now + std::time::Duration::from_secs(1));
+        assert_eq!(deadlines[1].at, now + std::time::Duration::from_secs(1));
+        super::advance_refresh_deadlines(
+            &mut deadlines,
+            &config,
+            backend,
+            &["lua".into(), "label".into(), "unknown".into()],
+            now,
+        );
+        assert_eq!(deadlines[3].at, now + std::time::Duration::from_secs(5));
+        assert_eq!(
+            super::due_item_ids(&deadlines, &config, now),
+            (vec![], vec![])
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1900,3 +1944,6 @@ return {{
         );
     }
 }
+
+#[cfg(test)]
+mod benchmarks;
