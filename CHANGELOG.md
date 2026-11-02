@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [0.3.2](https://github.com/TudorAndrei/barrs/releases/tag/v0.3.2) - 2026-11-02
+
+### Bug Fixes
+
+- (**ci**) install Nextest with its configured Rust toolchain - ([416ea4c](https://github.com/TudorAndrei/barrs/commit/416ea4c00a5c718165d6c16d640943a2074c0515)) - TudorAndrei
+
+### Documentation
+
+- describe the Cucumber feature tests - ([a96736b](https://github.com/TudorAndrei/barrs/commit/a96736b87477e2d9acfc2ba2adfb068c2d980770)) - TudorAndrei
+
+### Tests
+
+- (**config**) describe config loading as Cucumber features - ([973a31c](https://github.com/TudorAndrei/barrs/commit/973a31cf4393c1bd80fe35097cf99369d41c617b)) - TudorAndrei
+- (**daemon**) describe daemon control as Cucumber features - ([6d0ec90](https://github.com/TudorAndrei/barrs/commit/6d0ec90880b2d2533eb95c4f0bb62140ca785e5f)) - TudorAndrei
+- (**nextest**) add pinned runner to local and CI checks - ([a27392e](https://github.com/TudorAndrei/barrs/commit/a27392eca68f88e79118304d47a09dd805817de4)) - TudorAndrei
+
+### Continuous Integration
+
+- move macOS jobs from the retiring macos-14 image to macos-15 - ([a7e78d6](https://github.com/TudorAndrei/barrs/commit/a7e78d6c72df40622ab52fcc3a63f6c13a6fc95f)) - TudorAndrei
+
+- - -
+
 ## [0.3.1](https://github.com/TudorAndrei/barrs/releases/tag/v0.3.1) - 2026-10-24
 
 ### Bug Fixes
