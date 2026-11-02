@@ -66,8 +66,7 @@ updates render as one group: the native renderer arranges and publishes once.
 One item uses the same path. A failed group restores the logical renderer
 state; the bar records the shown snapshots only after the group succeeds.
 The renderer retains only displaced snapshots for rollback. Reload continues
-to reconcile the complete next state. See [[runtime-data-layout]] for the
-implementation checks and measurements. The native renderer is
+to reconcile the complete next state. The native renderer is
 macOS/AppKit-specific and is intentionally current-thread only; it draws
 through a native host, the `AppKit` host or a mock host for tests. The noop
 renderer supports tests and non-visual operation.
@@ -79,8 +78,6 @@ its deadline is due. It sends Lua indices and source IDs directly to their
 respective batches.
 Fixed labels without an interval have no row. Reload replaces the array with
 the configuration; results from an older epoch cannot advance new deadlines.
-The data layout and its scan benchmark are described in
-[[scheduler-data-layout]].
 
 The daemon directly owns its state. Its event loop processes stateful requests
 and results in order. Connection tasks parse requests, the blocking snapshot
