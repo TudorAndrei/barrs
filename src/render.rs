@@ -3582,3 +3582,6 @@ mod tests {
         )));
     }
 }
+
+#[cfg(test)]
+mod measurements;

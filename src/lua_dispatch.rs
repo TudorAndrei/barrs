@@ -390,3 +390,6 @@ return {{ items = {{ {{
         assert_eq!((texts, handled), (vec!["new1".to_owned()], 1));
     }
 }
+
+#[cfg(test)]
+mod measurements;

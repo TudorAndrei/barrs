@@ -93,3 +93,6 @@ impl<R: Renderer> Bar<R> {
         &self.renderer
     }
 }
+
+#[cfg(test)]
+mod measurements;
