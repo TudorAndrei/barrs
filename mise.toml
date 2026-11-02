@@ -4,6 +4,7 @@ mr-boxington = "1.23.0"
 cocogitto = "7.0.0"
 "cargo:cargo-release" = "1.1.2"
 "cargo:cargo-audit" = "0.22.2"
+"cargo:cargo-nextest" = "0.9.150"
 
 [tools."github:TudorAndrei/criv"]
 version = "0.7.0"
@@ -24,7 +25,15 @@ run = "cog bump --auto"
 
 [tasks.check]
 description = "Run the full locked Rust quality gate"
-run = "cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo check --all-targets --locked && cargo test --locked"
+run = "cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo check --all-targets --locked && mise run test"
+
+[tasks.test]
+description = "Run unit tests, Cucumber features, and documentation tests"
+run = [
+  "cargo nextest run --locked",
+  "cargo test --locked --test config --test daemon",
+  "cargo test --locked --doc",
+]
 
 [tasks.audit]
 description = "Check Cargo.lock against the RustSec advisory database"

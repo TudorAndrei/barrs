@@ -90,13 +90,28 @@ without a detached background process.
 
 ### Tests
 
-`cargo test` runs the unit tests and the Cucumber features. The features in
-`tests/features/` describe the behavior of barrs in Gherkin:
+Install the pinned tools, then run all tests:
+
+```bash
+mise install
+mise run test
+```
+
+`mise run test` runs unit tests with [cargo-nextest](https://nexte.st/), then
+runs the Cucumber features and documentation tests with Cargo. The Cucumber
+targets use a custom test harness and return no tests when Nextest lists them.
+Documentation tests need a separate Cargo command.
+
+`mise run check` also checks formatting, lints, and all targets. CI and the
+release checks run the same three test commands.
+
+The features in `tests/features/` describe the behavior of barrs in Gherkin:
 
 - `tests/features/config/` loads Lua configs (`tests/config.rs`).
 - `tests/features/daemon/` starts the `barrs` binary with the no-op renderer
   and drives it with the `barrs` commands (`tests/daemon.rs`).
 
+Run unit tests with `cargo nextest run --locked`.
 Run one domain with `cargo test --test config` or `cargo test --test daemon`.
 Add `-- --name <regex>` to run matching scenarios only.
 
