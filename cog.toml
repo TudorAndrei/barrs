@@ -6,7 +6,7 @@ branch_whitelist = ["main"]
 # `cog bump` commits and tags; the hooks keep Cargo metadata and the binary in step.
 pre_bump_hooks = [
   "cargo release version {{version}} --execute --no-confirm",
-  "cargo test",
+  "mise run test",
   "cargo run -- --version | grep -Fx 'barrs {{version}}'",
 ]
 post_bump_hooks = [
