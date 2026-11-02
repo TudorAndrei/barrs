@@ -18,8 +18,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v5
 
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install
+      - name: Install pinned Rust and test tools
+        uses: jdx/mise-action@v3
+        with:
+          install_args: rust mr-boxington cargo:cargo-nextest
 
       - name: Set up shared build cache
         uses: jdx/mr-boxington-action@v1
@@ -36,5 +38,11 @@ jobs:
       - name: Check all targets
         run: mbx check --all-targets --locked
 
-      - name: Run tests
-        run: mbx test --locked
+      - name: Run unit tests with Nextest
+        run: mbx nextest run --locked
+
+      - name: Run Cucumber features
+        run: mbx test --locked --test config --test daemon
+
+      - name: Run documentation tests
+        run: mbx test --locked --doc
