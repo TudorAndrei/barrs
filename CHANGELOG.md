@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [0.4.0](https://github.com/TudorAndrei/barrs/releases/tag/v0.4.0) - 2026-11-16
+
+### Features
+
+- (**time**) use jiff for dates and timestamps - ([bbe00ad](https://github.com/TudorAndrei/barrs/commit/bbe00ad4e4068870de1aeffe896e120576db9d68)) - TudorAndrei
+
+### Performance Improvements
+
+- (**runtime**) batch scene updates and index Lua state - ([fec3d5e](https://github.com/TudorAndrei/barrs/commit/fec3d5ec54306c7a903e0a1b46a10b4982c684fb)) - TudorAndrei
+- (**scheduler**) store refresh deadlines in a flat indexed array - ([0bed82a](https://github.com/TudorAndrei/barrs/commit/0bed82adc83e525f85066f754f587cf7f8a5435a)) - TudorAndrei
+
+### Documentation
+
+- (**perf**) record production batch and Lua measurements - ([644378c](https://github.com/TudorAndrei/barrs/commit/644378ce2ce8fae302fc6424764c19f7609db8e4)) - TudorAndrei
+- (**perf**) record repeated data-layout measurements - ([e6ab398](https://github.com/TudorAndrei/barrs/commit/e6ab39842c8c7b6102a3ff01afd3f01f3fdf5e8f)) - TudorAndrei
+- remove spike reports and retain referenced designs - ([70b2b34](https://github.com/TudorAndrei/barrs/commit/70b2b348203058a161e1b22b052cfa04fca23176)) - TudorAndrei
+
+### Tests
+
+- (**perf**) add data-layout comparison benchmarks - ([8534bfb](https://github.com/TudorAndrei/barrs/commit/8534bfb22a94e5197a9a7a1488d4da2157bed788)) - TudorAndrei
+
+- - -
+
 ## [0.3.2](https://github.com/TudorAndrei/barrs/releases/tag/v0.3.2) - 2026-11-02
 
 ### Bug Fixes
