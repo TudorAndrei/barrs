@@ -8,7 +8,7 @@
 use std::path::Path;
 use std::sync::mpsc as std_mpsc;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use mlua::{FromLuaMulti, Function, Lua, LuaSerdeExt};
 use serde_json::{Value, json};
@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use crate::config::{Config, load_config_with_runtime};
 use crate::content::ItemContent;
 use crate::error::BarrsError;
+use crate::ipc::current_timestamp_ms;
 
 /// Longest time one Lua event handler may run before barrs stops it.
 const HANDLER_TIMEOUT: Duration = Duration::from_secs(1);
@@ -165,11 +166,7 @@ fn run_update(lua: &Lua, function: &str, item_id: &str) -> Result<ItemContent, B
         .globals()
         .get(function)
         .map_err(|_| BarrsError::InvalidConfig(format!("missing update function {function}")))?;
-    let timestamp_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| {
-            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
-        });
+    let timestamp_ms = current_timestamp_ms();
     let context = lua.to_value(&json!({ "item_id": item_id, "timestamp_ms": timestamp_ms }))?;
     let returned = call_with_timeout::<mlua::Value>(lua, &func, context, UPDATE_TIMEOUT)?;
     update_content(lua, returned)

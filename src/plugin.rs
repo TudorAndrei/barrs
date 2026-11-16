@@ -1,6 +1,3 @@
-use std::ffi::{CStr, CString};
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use serde_json::json;
 
 use crate::content::{ItemContent, Workspace};
@@ -171,40 +168,8 @@ mod cpu_load {
 }
 
 fn format_local_time(format: &str) -> Result<String, BarrsError> {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|err| BarrsError::Unsupported(err.to_string()))?
-        .as_secs();
-    let timestamp = libc::time_t::try_from(seconds)
-        .map_err(|_| BarrsError::Unsupported("timestamp out of range".into()))?;
-    let mut local_time = std::mem::MaybeUninit::<libc::tm>::uninit();
-    let format =
-        CString::new(format).map_err(|_| BarrsError::Unsupported("format contains NUL".into()))?;
-    let mut buffer: [libc::c_char; 256] = [0; 256];
-
-    // SAFETY: `timestamp` is a valid `time_t`, and `local_time` is valid for writes of one `tm`.
-    // Both stay alive for the whole call.
-    if unsafe { libc::localtime_r(&raw const timestamp, local_time.as_mut_ptr()) }.is_null() {
-        return Err(BarrsError::Unsupported("failed to read local time".into()));
-    }
-    // SAFETY: `localtime_r` succeeded, so `local_time` is initialized. `buffer` is valid for
-    // writes of `buffer.len()` bytes, and `format` is a NUL-terminated C string.
-    let written = unsafe {
-        libc::strftime(
-            buffer.as_mut_ptr(),
-            buffer.len(),
-            format.as_ptr(),
-            local_time.as_ptr(),
-        )
-    };
-    if written == 0 {
-        return Err(BarrsError::Unsupported(
-            "failed to format local time".into(),
-        ));
-    }
-    // SAFETY: A non-zero `strftime` result means it wrote a NUL-terminated string into `buffer`.
-    let formatted = unsafe { CStr::from_ptr(buffer.as_ptr()) };
-    Ok(formatted.to_string_lossy().into_owned())
+    jiff::fmt::strtime::format(format, &jiff::ZonedDateTime::now())
+        .map_err(|err| BarrsError::Unsupported(format!("failed to format local time: {err}")))
 }
 
 fn battery_snapshot_from_power_sources() -> Option<ItemContent> {

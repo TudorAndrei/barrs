@@ -1836,7 +1836,7 @@ return {{
 return {{
   socket_path = "{}",
   items = {{
-    {{ id = "date", plugin = {{ kind = "date", format = string.rep("x", 256) }} }}
+    {{ id = "date", plugin = {{ kind = "date", format = "%" }} }}
   }}
 }}
 "#,
@@ -1861,10 +1861,10 @@ return {{
         let initial_error = daemon
             .refresh_all_items()
             .await
-            .expect_err("format exceeds buffer");
+            .expect_err("incomplete format directive");
         assert!(matches!(
             initial_error,
-            crate::error::BarrsError::Unsupported(message) if message == "failed to format local time"
+            crate::error::BarrsError::Unsupported(message) if message.starts_with("failed to format local time:")
         ));
         let click_response = answer(
             &mut daemon,
@@ -1879,7 +1879,7 @@ return {{
         assert!(matches!(
             click_response,
             Response::Error { message }
-                if message == "unsupported operation: failed to format local time"
+                if message.starts_with("unsupported operation: failed to format local time:")
         ));
         assert_eq!(renders.load(Ordering::SeqCst), 0);
         assert!(daemon.state.bar.items().is_empty());

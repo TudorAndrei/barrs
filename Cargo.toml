@@ -4,6 +4,7 @@ version = "0.3.2"
 edition = "2024"
 
 [dependencies]
+jiff = "1.0"
 libc = "0.2"
 mlua = { version = "0.12", features = ["lua54", "serialize", "vendored", "send"] }
 serde = { version = "1.0", features = ["derive"] }

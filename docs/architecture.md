@@ -85,6 +85,14 @@ tasks read owned inputs, and `src/lua_executor.rs` owns Lua on a separate
 thread. These tasks return values through messages. They do not share mutable
 daemon state or retained AppKit objects.
 
+The time and date plugins use Jiff to format the current time in the system
+time zone. Jiff replaces the C local-time conversion and fixed output buffer.
+The date format uses Jiff's `strftime` rules, with English names and no locale
+support. Invalid directives return a source error. Event payloads and Lua
+update contexts use `src/ipc.rs#fn:current_timestamp_ms` for Unix milliseconds
+from Jiff. Times before the Unix epoch return zero. Timers, deadlines, and
+elapsed-time measurements use the standard and Tokio monotonic clocks.
+
 ## Configuration and interaction
 
 `src/config.rs` evaluates the trusted Lua configuration once, deserializes it

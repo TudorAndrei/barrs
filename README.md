@@ -284,8 +284,11 @@ default. Example:
 }
 ```
 
-The `date` plugin accepts a raw `strftime` format string. Omit `format` to use
-`%Y-%m-%d`:
+The `date` plugin uses [Jiff's `strftime` format rules](https://docs.rs/jiff/1.0.0/jiff/fmt/strtime/index.html).
+Omit `format` to use `%Y-%m-%d`. Both `time` and `date` use the system time zone.
+Jiff does not use the system locale; weekday and month names are in English.
+Invalid format directives return an error. Output has no fixed byte limit.
+Example:
 
 ```lua
 {
