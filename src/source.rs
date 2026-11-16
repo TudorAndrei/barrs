@@ -434,13 +434,25 @@ mod tests {
     }
 
     #[test]
+    fn date_source_formats_literals_without_a_fixed_output_limit() {
+        for (format, expected) in [
+            (String::new(), String::new()),
+            ("日付 %% ".repeat(100), "日付 % ".repeat(100)),
+        ] {
+            let data = date(&format).content(None).expect("date").data();
+            assert_eq!(data["text"], expected);
+            assert_eq!(data["format"], format);
+        }
+    }
+
+    #[test]
     fn date_source_returns_formatting_error() {
-        let error = date(&"x".repeat(256))
+        let error = date("%")
             .content(None)
-            .expect_err("format exceeds output buffer");
+            .expect_err("incomplete format directive");
         assert!(matches!(
             error,
-            BarrsError::Unsupported(message) if message == "failed to format local time"
+            BarrsError::Unsupported(message) if message.starts_with("failed to format local time:")
         ));
     }
 

@@ -1,6 +1,5 @@
 use std::env;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
@@ -69,14 +68,10 @@ impl EventPayload {
     }
 }
 
+/// Milliseconds since the Unix epoch, clamped to zero before the epoch.
 #[must_use]
 pub fn current_timestamp_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
+    u64::try_from(jiff::Timestamp::now().as_millisecond()).unwrap_or_default()
 }
 
 /// An item event. Each kind also names the handler slot that receives it, so
